@@ -76,12 +76,6 @@ button {
   backdrop-filter: blur(10px);
 }
 
-.topbar-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
 .eyebrow {
   margin: 0 0 4px;
   color: var(--blue);
@@ -127,20 +121,6 @@ h2 {
   color: var(--red);
 }
 
-.model-pill {
-  display: inline-flex;
-  align-items: center;
-  min-height: 28px;
-  padding: 0 10px;
-  border: 1px solid rgba(48, 106, 248, 0.46);
-  border-radius: 999px;
-  background: rgba(48, 106, 248, 0.14);
-  color: var(--muted);
-  font-size: 0.76rem;
-  font-weight: 700;
-  white-space: nowrap;
-}
-
 .refresh-button {
   min-width: 112px;
   height: 42px;
@@ -171,48 +151,11 @@ h2 {
   transform: scale(0.98);
 }
 
-.metric-strip {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-  margin: 2px 0 12px;
-}
-
-.metric {
-  min-height: 74px;
-  padding: 12px 14px;
-  border-radius: 8px;
-}
-
-.metric,
 .trace-list,
 .detail-panel {
   border: 1px solid var(--border);
   background: rgba(39, 40, 43, 0.92);
   box-shadow: 0 12px 28px var(--shadow);
-}
-
-.metric span,
-.fact span {
-  display: block;
-  color: var(--muted);
-  font-size: 0.76rem;
-}
-
-.metric strong {
-  display: block;
-  margin-top: 4px;
-  font-size: 1.55rem;
-  line-height: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.metric.good strong {
-  color: var(--green);
 }
 
 .workspace {
@@ -324,30 +267,6 @@ h2 {
   border-radius: 8px;
   background: rgb(45, 47, 51);
   color: var(--text);
-}
-
-.profile-head {
-  margin: 14px 0 8px;
-}
-
-.profile-facts {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.fact {
-  min-height: 58px;
-  padding: 9px 10px;
-  border: 1px solid rgba(67, 70, 75, 0.88);
-  border-radius: 8px;
-  background: rgb(39, 40, 43);
-}
-
-.fact strong {
-  display: block;
-  margin-top: 4px;
-  font-size: 0.9rem;
 }
 
 .genre-chips {
@@ -564,18 +483,6 @@ h2 {
   color: var(--green);
 }
 
-.score-pill.match {
-  border-color: rgba(48, 106, 248, 0.46);
-  background: rgba(48, 106, 248, 0.14);
-  color: var(--text);
-}
-
-.score-pill.match.low {
-  border-color: rgba(173, 179, 189, 0.24);
-  background: rgba(173, 179, 189, 0.08);
-  color: var(--muted);
-}
-
 .rec-community {
   color: var(--quiet);
   font-size: 0.74rem;
@@ -659,10 +566,6 @@ h2 {
   .topbar {
     align-items: flex-start;
     flex-direction: column;
-  }
-
-  .metric-strip {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .rec-row {

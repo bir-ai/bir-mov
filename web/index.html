@@ -13,17 +13,7 @@
         <div class="brand-lockup" aria-label="bir mov">
           <h1>bir<span class="brand-dot">·</span>mov</h1>
         </div>
-        <div class="topbar-actions">
-          <span class="model-pill" id="model-pill">loading models…</span>
-        </div>
       </header>
-
-      <section class="metric-strip" id="metric-strip" hidden>
-        <div class="metric"><span>Titles matched</span><strong id="m-matched">–</strong></div>
-        <div class="metric"><span>Your average rating</span><strong id="m-mean">–</strong></div>
-        <div class="metric good"><span>Liked titles used</span><strong id="m-liked">–</strong></div>
-        <div class="metric"><span>Top genre</span><strong id="m-genre">–</strong></div>
-      </section>
 
       <div class="workspace">
         <aside class="trace-list">
@@ -64,8 +54,7 @@
           </div>
 
           <div id="profile-box" hidden>
-            <div class="filter-group profile-head"><span>Taste profile</span></div>
-            <div class="profile-facts" id="profile-facts"></div>
+            <p class="subtle" id="profile-summary"></p>
             <div class="genre-chips" id="genre-chips"></div>
             <details class="unmatched" id="unmatched-box" hidden>
               <summary id="unmatched-summary"></summary>
@@ -79,9 +68,7 @@
             <div>
               <p class="eyebrow">Recommendations</p>
               <h2 id="results-title">Personal picks</h2>
-              <p class="subtle" id="results-subtitle">
-                Ranked by the ALS model, scored by the matrix-factorization model — both trained on MovieLens ml-32m.
-              </p>
+              <p class="subtle" id="results-subtitle">Based on what you loved — and what you didn't.</p>
             </div>
             <div class="export-actions" id="export-actions" hidden>
               <button class="inline-action" id="export-csv" type="button">Export CSV</button>

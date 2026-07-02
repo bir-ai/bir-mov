@@ -9,23 +9,6 @@ const runButton = el("run-button");
 let selectedFile = null;
 let lastResult = null;
 
-// ---- health / model info -------------------------------------------------
-
-async function loadHealth() {
-  try {
-    const res = await fetch("/api/health");
-    const data = await res.json();
-    if (data.models) {
-      el("model-pill").textContent = `${data.models.als.name} + ${data.models.mf.name}`;
-    } else {
-      el("model-pill").textContent = "models loading…";
-      setTimeout(loadHealth, 2500);
-    }
-  } catch {
-    el("model-pill").textContent = "server offline";
-  }
-}
-
 // ---- file selection --------------------------------------------------------
 
 function setFile(file) {
@@ -114,17 +97,6 @@ runButton.addEventListener("click", run);
 
 // ---- rendering ---------------------------------------------------------------
 
-function fact(label, value) {
-  const box = document.createElement("div");
-  box.className = "fact";
-  const span = document.createElement("span");
-  span.textContent = label;
-  const strong = document.createElement("strong");
-  strong.textContent = value;
-  box.append(span, strong);
-  return box;
-}
-
 function chip(text) {
   const span = document.createElement("span");
   span.className = "doc-chip";
@@ -152,24 +124,13 @@ function link(href, label) {
 function render(data) {
   const { profile, recommendations, source } = data;
 
-  el("metric-strip").hidden = false;
-  el("m-matched").textContent = `${profile.matched} / ${profile.parsed}`;
-  el("m-mean").textContent =
-    source === "imdb" ? `${profile.mean_rating10} / 10` : `${profile.mean_rating5} / 5`;
-  el("m-liked").textContent = String(profile.liked_titles);
-  el("m-genre").textContent = profile.top_genres[0] || "–";
-
   el("results-title").textContent =
     source === "imdb" ? "Picks from your IMDb ratings" : "Picks from your Letterboxd diary";
 
-  const facts = el("profile-facts");
-  facts.innerHTML = "";
-  facts.append(
-    fact("Source", source === "imdb" ? "IMDb export" : "Letterboxd export"),
-    fact("Rows parsed", String(profile.parsed)),
-    fact("Matched to catalog", String(profile.matched)),
-    fact("Liked threshold", `≥ ${profile.like_threshold5} ★`)
-  );
+  const mean =
+    source === "imdb" ? `${profile.mean_rating10} / 10` : `${profile.mean_rating5} / 5`;
+  el("profile-summary").textContent =
+    `${profile.matched} of ${profile.parsed} titles matched · you rate ${mean} on average`;
 
   const chips = el("genre-chips");
   chips.innerHTML = "";
@@ -244,12 +205,7 @@ function render(data) {
     scores.className = "rec-scores";
     scores.append(
       pill("imdb", `IMDb ${rec.predicted_imdb10.toFixed(1)} / 10`, "Predicted rating on IMDb's 10-point scale"),
-      pill("letterboxd", `LB ${rec.predicted_letterboxd5.toFixed(1)} / 5`, "Predicted rating on Letterboxd's 5-star scale"),
-      pill(
-        rec.match_pct >= 45 ? "match" : "match low",
-        `match ${rec.match_pct}%`,
-        "Ranking strength relative to your top pick"
-      )
+      pill("letterboxd", `LB ${rec.predicted_letterboxd5.toFixed(1)} / 5`, "Predicted rating on Letterboxd's 5-star scale")
     );
     const community = document.createElement("div");
     community.className = "rec-community";
@@ -324,5 +280,3 @@ el("export-letterboxd").addEventListener("click", () => {
   ];
   download("bir-mov-letterboxd-import.csv", "text/csv;charset=utf-8", toCsv(rows));
 });
-
-loadHealth();
