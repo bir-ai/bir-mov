@@ -39,6 +39,25 @@ MF_BIAS_DAMPING = 10.0      # shrinkage for the folded-in user bias
 MF_LAMBDA = 0.02            # per-sample L2 used at training time
 LIKE_THRESHOLDS = (4.0, 3.5, 3.0)
 
+RERANK_POOL_MIN = 500
+RERANK_POOL_MAX = 4_000
+RERANK_POOL_MULTIPLIER = 40
+SIMILARITY_PROFILE_LIMIT = 300
+MMR_POOL_MULTIPLIER = 10
+MMR_POOL_MIN = 200
+DIVERSITY_PENALTY = 0.08
+DISLIKE_CUTOFF_FALLBACK = 2.5
+
+RERANK_WEIGHTS = {
+    "als": 0.50,
+    "mf": 0.22,
+    "genre": 0.10,
+    "quality": 0.08,
+    "liked_similarity": 0.08,
+    "novelty": 0.02,
+    "disliked_similarity": 0.16,
+}
+
 
 def resolve_model_dir(name: str, project_root: Path) -> Path:
     """Prefer the local artifact directory; fall back to the Hugging Face repo."""
@@ -71,10 +90,19 @@ class Recommendation:
     movie: Movie
     predicted5: float       # Letterboxd-style 0.5-5.0
     predicted10: float      # IMDb-style 1-10
-    match_pct: int          # ALS rank score, normalized within this result set
+    match_pct: int          # combined rerank score, normalized within this result set
     als_score: float
+    rerank_score: float
     because_of: list[str]   # titles from the user's own liked list
     confidence: str         # high | medium | low
+
+
+@dataclass
+class RerankedCandidate:
+    idx: int
+    movie: Movie
+    als_score: float
+    rerank_score: float
 
 
 class Recommender:
@@ -103,6 +131,12 @@ class Recommender:
                 "name": checkpoint.get("model_name", "ml32m-mf128-v1"),
                 "factors": int(self.mf_Q.shape[1]),
                 "val_rmse": float(checkpoint.get("training", {}).get("best_val_rmse", 0.0)),
+            },
+            "reranker": {
+                "pool_min": RERANK_POOL_MIN,
+                "pool_max": RERANK_POOL_MAX,
+                "pool_multiplier": RERANK_POOL_MULTIPLIER,
+                "weights": RERANK_WEIGHTS,
             },
         }
 
@@ -142,6 +176,9 @@ class Recommender:
     def _als_rank(
         self, liked_idx: np.ndarray, rated_idx: np.ndarray, top_n: int
     ) -> tuple[np.ndarray, np.ndarray]:
+        limit = min(top_n, self.n_movies - len(rated_idx))
+        if limit <= 0:
+            return np.array([], dtype=np.int64), np.array([], dtype=np.float64)
         data = np.full(len(liked_idx), ALS_ALPHA, dtype=np.float32)
         user_row = sp.csr_matrix(
             (data, (np.zeros(len(liked_idx), dtype=np.int64), liked_idx)),
@@ -150,7 +187,7 @@ class Recommender:
         ids, scores = self.als.recommend(
             0,
             user_row,
-            N=min(top_n, self.n_movies - len(rated_idx)),
+            N=limit,
             filter_already_liked_items=True,
             filter_items=rated_idx,
             recalculate_user=True,
@@ -163,6 +200,203 @@ class Recommender:
         sims = self._als_items_unit[liked_idx] @ self._als_items_unit[rec_idx]
         order = np.argsort(-sims)[:k]
         return [titles_by_idx[int(liked_idx[i])] for i in order if sims[i] > 0.1]
+
+    # ---- reranking helpers ------------------------------------------------
+
+    def _candidate_pool_size(self, count: int, rated_count: int) -> int:
+        available = max(0, self.n_movies - rated_count)
+        target = max(RERANK_POOL_MIN, count * RERANK_POOL_MULTIPLIER)
+        return min(available, RERANK_POOL_MAX, target)
+
+    @staticmethod
+    def _minmax(values: np.ndarray) -> np.ndarray:
+        if len(values) == 0:
+            return values.astype(np.float64)
+        lo = float(np.min(values))
+        hi = float(np.max(values))
+        if hi <= lo:
+            return np.ones_like(values, dtype=np.float64)
+        return ((values - lo) / (hi - lo)).astype(np.float64)
+
+    @staticmethod
+    def _ratio_to_top(values: np.ndarray) -> np.ndarray:
+        if len(values) == 0:
+            return values.astype(np.float64)
+        top = float(np.max(values))
+        if top <= 0:
+            return Recommender._minmax(values)
+        return np.clip(values / top, 0.0, 1.0).astype(np.float64)
+
+    @staticmethod
+    def _imdb_quality(movie: Movie) -> float:
+        rating = 5.8 if movie.imdb_rating is None else movie.imdb_rating
+        rating_score = np.clip((rating - 5.5) / 3.0, 0.0, 1.0)
+        vote_score = np.clip(np.log1p(movie.imdb_votes) / np.log1p(100_000), 0.0, 1.0)
+        return float(0.75 * rating_score + 0.25 * vote_score)
+
+    @staticmethod
+    def _novelty(movie: Movie) -> float:
+        popularity = np.clip(np.log1p(movie.imdb_votes) / np.log1p(250_000), 0.0, 1.0)
+        return float(1.0 - popularity)
+
+    @staticmethod
+    def _dislike_cutoff(like_threshold: float) -> float:
+        return min(DISLIKE_CUTOFF_FALLBACK, like_threshold - 1.0)
+
+    @staticmethod
+    def _genre_profiles(
+        known_unique: list[tuple[Movie, float]], like_threshold: float
+    ) -> tuple[dict[str, float], dict[str, float]]:
+        positive: dict[str, float] = {}
+        negative: dict[str, float] = {}
+        dislike_cutoff = Recommender._dislike_cutoff(like_threshold)
+        for movie, rating in known_unique:
+            if rating >= like_threshold:
+                weight = max(0.25, rating - like_threshold + 0.5)
+                target = positive
+            elif rating <= dislike_cutoff:
+                weight = max(0.25, dislike_cutoff - rating + 0.5)
+                target = negative
+            else:
+                continue
+            for genre in movie.genres:
+                target[genre] = target.get(genre, 0.0) + weight
+        return positive, negative
+
+    @staticmethod
+    def _genre_score(movie: Movie, positive: dict[str, float], negative: dict[str, float]) -> float:
+        if not movie.genres:
+            return 0.5
+        pos_total = sum(positive.values())
+        neg_total = sum(negative.values())
+        pos_overlap = (
+            sum(positive.get(genre, 0.0) for genre in movie.genres) / pos_total
+            if pos_total > 0
+            else 0.0
+        )
+        neg_overlap = (
+            sum(negative.get(genre, 0.0) for genre in movie.genres) / neg_total
+            if neg_total > 0
+            else 0.0
+        )
+        score = 0.5 + 0.5 * np.sqrt(pos_overlap) - 0.5 * np.sqrt(neg_overlap)
+        return float(np.clip(score, 0.0, 1.0))
+
+    @staticmethod
+    def _profile_sample(
+        idx: np.ndarray, ratings5: np.ndarray, mask: np.ndarray, high_first: bool
+    ) -> np.ndarray:
+        profile_idx = idx[mask]
+        if len(profile_idx) <= SIMILARITY_PROFILE_LIMIT:
+            return profile_idx
+        profile_ratings = ratings5[mask]
+        order = np.argsort(-profile_ratings if high_first else profile_ratings)
+        return profile_idx[order[:SIMILARITY_PROFILE_LIMIT]]
+
+    def _profile_similarity(self, candidate_idx: np.ndarray, profile_idx: np.ndarray) -> np.ndarray:
+        if len(candidate_idx) == 0 or len(profile_idx) == 0:
+            return np.zeros(len(candidate_idx), dtype=np.float64)
+        sims = self._als_items_unit[candidate_idx] @ self._als_items_unit[profile_idx].T
+        return np.clip(np.max(sims, axis=1), 0.0, 1.0).astype(np.float64)
+
+    def _diverse_order(
+        self, candidate_idx: np.ndarray, scores: np.ndarray, count: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if len(candidate_idx) <= count:
+            order = np.argsort(-scores)
+            return order, scores[order]
+
+        pool_size = min(len(candidate_idx), max(MMR_POOL_MIN, count * MMR_POOL_MULTIPLIER))
+        remaining = np.argsort(-scores)[:pool_size]
+        selected: list[int] = []
+        selected_scores: list[float] = []
+
+        while len(selected) < count and len(remaining) > 0:
+            if not selected:
+                pick_at = 0
+                adjusted_scores = scores[remaining]
+            else:
+                sims = (
+                    self._als_items_unit[candidate_idx[remaining]]
+                    @ self._als_items_unit[candidate_idx[np.array(selected, dtype=np.int64)]].T
+                )
+                duplicate_penalty = np.clip(np.max(sims, axis=1), 0.0, 1.0) * DIVERSITY_PENALTY
+                adjusted_scores = scores[remaining] - duplicate_penalty
+                pick_at = int(np.argmax(adjusted_scores))
+            selected.append(int(remaining[pick_at]))
+            selected_scores.append(float(adjusted_scores[pick_at]))
+            remaining = np.delete(remaining, pick_at)
+
+        return np.array(selected, dtype=np.int64), np.array(selected_scores, dtype=np.float64)
+
+    def _rerank_candidates(
+        self,
+        ids: np.ndarray,
+        als_scores: np.ndarray,
+        mf_scores: np.ndarray,
+        catalog: Catalog,
+        min_votes: int,
+        liked_for_similarity: np.ndarray,
+        disliked_for_similarity: np.ndarray,
+        genre_positive: dict[str, float],
+        genre_negative: dict[str, float],
+        count: int,
+    ) -> list[RerankedCandidate]:
+        candidates: list[tuple[int, Movie, float]] = []
+        for rec_i, score in zip(ids, als_scores):
+            movie = catalog.movies.get(int(self.movie_ids[rec_i]))
+            if movie is None or movie.imdb_votes < min_votes:
+                continue
+            candidates.append((int(rec_i), movie, float(score)))
+
+        if not candidates:
+            return []
+
+        candidate_idx = np.array([idx for idx, _, _ in candidates], dtype=np.int64)
+        candidate_als = np.array([score for _, _, score in candidates], dtype=np.float64)
+        candidate_mf = mf_scores[candidate_idx]
+
+        als_component = self._ratio_to_top(candidate_als)
+        mf_component = (
+            0.65 * self._minmax(candidate_mf)
+            + 0.35 * np.clip((candidate_mf - 2.5) / 2.5, 0.0, 1.0)
+        )
+        genre_component = np.array(
+            [
+                self._genre_score(movie, genre_positive, genre_negative)
+                for _, movie, _ in candidates
+            ],
+            dtype=np.float64,
+        )
+        quality_component = np.array(
+            [self._imdb_quality(movie) for _, movie, _ in candidates], dtype=np.float64
+        )
+        novelty_component = np.array(
+            [self._novelty(movie) for _, movie, _ in candidates], dtype=np.float64
+        )
+        liked_similarity = self._profile_similarity(candidate_idx, liked_for_similarity)
+        disliked_similarity = self._profile_similarity(candidate_idx, disliked_for_similarity)
+
+        rerank_scores = (
+            RERANK_WEIGHTS["als"] * als_component
+            + RERANK_WEIGHTS["mf"] * mf_component
+            + RERANK_WEIGHTS["genre"] * genre_component
+            + RERANK_WEIGHTS["quality"] * quality_component
+            + RERANK_WEIGHTS["liked_similarity"] * liked_similarity
+            + RERANK_WEIGHTS["novelty"] * novelty_component
+            - RERANK_WEIGHTS["disliked_similarity"] * disliked_similarity
+        )
+
+        order, selected_scores = self._diverse_order(candidate_idx, rerank_scores, count)
+        return [
+            RerankedCandidate(
+                idx=int(candidate_idx[pos]),
+                movie=candidates[pos][1],
+                als_score=float(candidate_als[pos]),
+                rerank_score=float(score),
+            )
+            for pos, score in zip(order, selected_scores)
+        ]
 
     # ---- public API ------------------------------------------------------
 
@@ -185,50 +419,69 @@ class Recommender:
         unique_idx, starts = np.unique(idx, return_index=True)
         ratings5 = np.array([ratings5[s:e].mean() for s, e in zip(starts, [*starts[1:], len(idx)])])
         idx = unique_idx
+        movie_by_idx = {self.movie_id_to_idx[m.movie_id]: m for m, _ in known}
+        known_unique = [(movie_by_idx[int(movie_i)], rating) for movie_i, rating in zip(idx, ratings5)]
 
         liked_idx, like_threshold = self._liked_indices(idx, ratings5)
         mf_scores = self._mf_predict_all(idx, ratings5)
-        ids, als_scores = self._als_rank(liked_idx, idx, top_n=count * 5 + len(idx))
+        pool_size = self._candidate_pool_size(count, len(idx))
+        ids, als_scores = self._als_rank(liked_idx, idx, top_n=pool_size)
+        dislike_cutoff = self._dislike_cutoff(like_threshold)
+        liked_for_similarity = self._profile_sample(
+            idx, ratings5, ratings5 >= like_threshold, high_first=True
+        )
+        disliked_for_similarity = self._profile_sample(
+            idx, ratings5, ratings5 <= dislike_cutoff, high_first=False
+        )
+        genre_positive, genre_negative = self._genre_profiles(known_unique, like_threshold)
+        ranked = self._rerank_candidates(
+            ids=ids,
+            als_scores=als_scores,
+            mf_scores=mf_scores,
+            catalog=catalog,
+            min_votes=min_votes,
+            liked_for_similarity=liked_for_similarity,
+            disliked_for_similarity=disliked_for_similarity,
+            genre_positive=genre_positive,
+            genre_negative=genre_negative,
+            count=count,
+        )
 
+        liked_set = set(liked_idx.tolist())
         titles_by_idx = {
             self.movie_id_to_idx[m.movie_id]: m.title
             for m, r in known
-            if self.movie_id_to_idx[m.movie_id] in set(liked_idx.tolist())
+            if self.movie_id_to_idx[m.movie_id] in liked_set
         }
 
-        top_score = float(als_scores[0]) if len(als_scores) else 1.0
+        top_score = max((cand.rerank_score for cand in ranked), default=1.0)
         recs: list[Recommendation] = []
-        for rec_i, score in zip(ids, als_scores):
-            movie = catalog.movies.get(int(self.movie_ids[rec_i]))
-            if movie is None or movie.imdb_votes < min_votes:
-                continue
-            match_pct = int(round(100 * float(score) / top_score)) if top_score > 0 else 0
+        for cand in ranked:
+            match_pct = (
+                int(round(100 * max(cand.rerank_score, 0.0) / top_score))
+                if top_score > 0
+                else 0
+            )
             confidence = (
-                "high" if match_pct >= 75 and movie.imdb_votes >= 10_000
+                "high" if match_pct >= 75 and cand.movie.imdb_votes >= 10_000
                 else "medium" if match_pct >= 45
                 else "low"
             )
-            predicted5 = float(mf_scores[rec_i])
+            predicted5 = float(mf_scores[cand.idx])
             recs.append(
                 Recommendation(
-                    movie=movie,
+                    movie=cand.movie,
                     predicted5=round(predicted5 * 2) / 2,       # Letterboxd uses half stars
                     predicted10=round(predicted5 * 2, 1),
                     match_pct=match_pct,
-                    als_score=float(score),
-                    because_of=self._because_of(int(rec_i), liked_idx, titles_by_idx),
+                    als_score=cand.als_score,
+                    rerank_score=cand.rerank_score,
+                    because_of=self._because_of(cand.idx, liked_idx, titles_by_idx),
                     confidence=confidence,
                 )
             )
-            if len(recs) >= count:
-                break
 
-        genre_weights: dict[str, float] = {}
-        for movie, rating in known:
-            if rating >= like_threshold:
-                for genre in movie.genres:
-                    genre_weights[genre] = genre_weights.get(genre, 0.0) + rating
-        top_genres = [g for g, _ in sorted(genre_weights.items(), key=lambda kv: -kv[1])[:5]]
+        top_genres = [g for g, _ in sorted(genre_positive.items(), key=lambda kv: -kv[1])[:5]]
 
         profile = UserProfile(
             n_rated=len(matched),
