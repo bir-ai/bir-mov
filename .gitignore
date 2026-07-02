@@ -1,0 +1,35 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+build/
+dist/
+
+# Notebook / plotting caches
+.ipynb_checkpoints/
+.matplotlib-cache/
+
+# MovieLens raw data (download separately, see README)
+ml-32m/
+
+# Model artifacts (hosted on Hugging Face, cached locally)
+model/**/*.pt
+model/**/*.npz
+model/**/*.npy
+.hf-cache/
+
+# Derived data caches
+data/*.parquet
+
+# Local environment and OS files
+.env
+.env.*
+.DS_Store
+
+# Local agent guidance (kept out of the repo)
+AGENTS.md
