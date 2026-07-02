@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>bir·mov — movie recommendations</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <img class="side-brand-mark" src="/bir_mark.png" alt="" />
+      <header class="topbar">
+        <div class="brand-lockup" aria-label="bir mov">
+          <h1>bir<span class="brand-dot">·</span>mov</h1>
+        </div>
+        <div class="topbar-actions">
+          <span class="model-pill" id="model-pill">loading models…</span>
+        </div>
+      </header>
+
+      <section class="metric-strip" id="metric-strip" hidden>
+        <div class="metric"><span>Titles matched</span><strong id="m-matched">–</strong></div>
+        <div class="metric"><span>Your average rating</span><strong id="m-mean">–</strong></div>
+        <div class="metric good"><span>Liked titles used</span><strong id="m-liked">–</strong></div>
+        <div class="metric"><span>Top genre</span><strong id="m-genre">–</strong></div>
+      </section>
+
+      <div class="workspace">
+        <aside class="trace-list">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Your Ratings</p>
+              <h2>Upload an export</h2>
+              <p class="subtle">IMDb ratings CSV, Letterboxd ratings.csv, or a full Letterboxd export .zip</p>
+            </div>
+          </div>
+
+          <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Upload ratings file">
+            <input type="file" id="file-input" accept=".csv,.zip" hidden />
+            <strong id="dropzone-title">Drop your file here</strong>
+            <span id="dropzone-hint">or click to browse</span>
+          </div>
+
+          <div class="trace-filters">
+            <div class="filter-group">
+              <span>Recommendations</span>
+              <select id="opt-count">
+                <option value="10">10 movies</option>
+                <option value="25" selected>25 movies</option>
+                <option value="50">50 movies</option>
+                <option value="100">100 movies</option>
+              </select>
+            </div>
+            <div class="filter-group">
+              <span>Obscurity filter</span>
+              <select id="opt-votes">
+                <option value="0">Include everything</option>
+                <option value="50" selected>Skip very obscure (&lt;50 votes)</option>
+                <option value="500">Mainstream-ish (&gt;500 votes)</option>
+                <option value="5000">Well known (&gt;5000 votes)</option>
+              </select>
+            </div>
+            <button class="refresh-button" id="run-button" type="button" disabled>Get recommendations</button>
+          </div>
+
+          <div id="profile-box" hidden>
+            <div class="filter-group profile-head"><span>Taste profile</span></div>
+            <div class="profile-facts" id="profile-facts"></div>
+            <div class="genre-chips" id="genre-chips"></div>
+            <details class="unmatched" id="unmatched-box" hidden>
+              <summary id="unmatched-summary"></summary>
+              <ul id="unmatched-list"></ul>
+            </details>
+          </div>
+        </aside>
+
+        <section class="detail-panel">
+          <div class="detail-head">
+            <div>
+              <p class="eyebrow">Recommendations</p>
+              <h2 id="results-title">Personal picks</h2>
+              <p class="subtle" id="results-subtitle">
+                Ranked by the ALS model, scored by the matrix-factorization model — both trained on MovieLens ml-32m.
+              </p>
+            </div>
+            <div class="export-actions" id="export-actions" hidden>
+              <button class="inline-action" id="export-csv" type="button">Export CSV</button>
+              <button class="inline-action" id="export-json" type="button">Export JSON</button>
+              <button class="inline-action" id="export-letterboxd" type="button">Letterboxd import CSV</button>
+            </div>
+          </div>
+
+          <div class="results-body" id="results-body">
+            <div class="empty-detail" id="empty-state">
+              Upload your IMDb or Letterboxd ratings to get a personal watchlist.
+            </div>
+            <div class="skeleton-stack" id="loading-state" hidden>
+              <span></span><span></span><span></span><span></span><span></span>
+            </div>
+            <div class="state-box error-state" id="error-state" hidden></div>
+            <div class="rec-items" id="rec-items"></div>
+          </div>
+        </section>
+      </div>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

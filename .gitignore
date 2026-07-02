@@ -33,3 +33,4 @@ data/*.parquet
 
 # Local agent guidance (kept out of the repo)
 AGENTS.md
+.claude
