@@ -42,12 +42,13 @@
               </select>
             </div>
             <div class="filter-group">
-              <span>Obscurity filter</span>
+              <span>IMDb vote filter</span>
               <select id="opt-votes">
                 <option value="0">Include everything</option>
-                <option value="50" selected>Skip very obscure (&lt;50 votes)</option>
-                <option value="500">Mainstream-ish (&gt;500 votes)</option>
-                <option value="5000">Well known (&gt;5000 votes)</option>
+                <option value="50" selected>Skip very obscure (&lt;50 IMDb votes)</option>
+                <option value="500">Mainstream-ish (&gt;500 IMDb votes)</option>
+                <option value="5000">Well known (&gt;5,000 IMDb votes)</option>
+                <option value="50000">Broadly known (&gt;50,000 IMDb votes)</option>
               </select>
             </div>
             <button class="refresh-button" id="run-button" type="button" disabled>Get recommendations</button>

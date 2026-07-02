@@ -200,11 +200,11 @@ class Recommender:
         recs: list[Recommendation] = []
         for rec_i, score in zip(ids, als_scores):
             movie = catalog.movies.get(int(self.movie_ids[rec_i]))
-            if movie is None or movie.n_ratings < min_votes:
+            if movie is None or movie.imdb_votes < min_votes:
                 continue
             match_pct = int(round(100 * float(score) / top_score)) if top_score > 0 else 0
             confidence = (
-                "high" if match_pct >= 75 and movie.n_ratings >= 1000
+                "high" if match_pct >= 75 and movie.imdb_votes >= 10_000
                 else "medium" if match_pct >= 45
                 else "low"
             )

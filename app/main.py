@@ -12,12 +12,13 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 
 from .catalog import Catalog, load_catalog
+from .imdb_data import IMDB_RATINGS_FILENAME, ensure_imdb_ratings
 from .parsers import ParseError, parse_upload
 from .recommender import Recommender
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_ROOT = PROJECT_ROOT / "ml-32m"
-STATS_PATH = PROJECT_ROOT / "data" / "movie_stats.csv"
+IMDB_RATINGS_PATH = PROJECT_ROOT / "data" / IMDB_RATINGS_FILENAME
 WEB_ROOT = PROJECT_ROOT / "web"
 
 MAX_UPLOAD_BYTES = 30 * 1024 * 1024
@@ -31,7 +32,8 @@ _recommender: Recommender | None = None
 @app.on_event("startup")
 def load_runtime() -> None:
     global _catalog, _recommender
-    _catalog = load_catalog(DATA_ROOT, STATS_PATH)
+    imdb_ratings_path = ensure_imdb_ratings(IMDB_RATINGS_PATH)
+    _catalog = load_catalog(DATA_ROOT, imdb_ratings_path)
     _recommender = Recommender(PROJECT_ROOT)
 
 
@@ -40,6 +42,9 @@ def health() -> dict:
     return {
         "status": "ok",
         "catalog_movies": len(_catalog.movies) if _catalog else 0,
+        "imdb_ratings_loaded": (
+            any(m.imdb_votes > 0 for m in _catalog.movies.values()) if _catalog else False
+        ),
         "models": _recommender.meta if _recommender else None,
     }
 
@@ -58,8 +63,8 @@ def _movie_payload(rec) -> dict:
         "match_pct": rec.match_pct,
         "confidence": rec.confidence,
         "because_of": rec.because_of,
-        "community_avg5": movie.mean_rating,
-        "community_votes": movie.n_ratings,
+        "imdb_rating": movie.imdb_rating,
+        "imdb_votes": movie.imdb_votes,
     }
 
 
@@ -72,7 +77,7 @@ async def recommend(
     if _catalog is None or _recommender is None:
         raise HTTPException(status_code=503, detail="Models are still loading, retry shortly.")
     count = max(1, min(100, count))
-    min_votes = max(0, min(100_000, min_votes))
+    min_votes = max(0, min(10_000_000, min_votes))
 
     content = await file.read()
     if len(content) > MAX_UPLOAD_BYTES:

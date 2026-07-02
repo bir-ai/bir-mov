@@ -453,9 +453,10 @@ h2 {
 }
 
 .rec-scores {
-  display: grid;
+  display: flex;
+  flex-wrap: wrap;
   gap: 6px;
-  justify-items: end;
+  justify-content: flex-end;
 }
 
 .score-pill {
@@ -483,10 +484,9 @@ h2 {
   color: var(--green);
 }
 
-.rec-community {
-  color: var(--quiet);
-  font-size: 0.74rem;
-  text-align: right;
+.score-pill.actual-imdb {
+  border-color: rgba(242, 181, 55, 0.26);
+  color: var(--muted);
 }
 
 .state-box,
@@ -575,12 +575,6 @@ h2 {
   .rec-scores {
     grid-column: 1 / -1;
     grid-row: 2;
-    justify-items: start;
-    grid-auto-flow: column;
     justify-content: start;
-  }
-
-  .rec-community {
-    text-align: left;
   }
 }

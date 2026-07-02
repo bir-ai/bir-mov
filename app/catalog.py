@@ -1,7 +1,7 @@
 """Movie catalog: titles, genres, external links, and matching indexes.
 
-Loads movies.csv + links.csv from the MovieLens dump and the precomputed
-data/movie_stats.csv cache, then builds the lookup structures the parsers and
+Loads movies.csv + links.csv from the MovieLens dump and IMDb's
+title.ratings.tsv.gz cache, then builds the lookup structures the parsers and
 recommender need:
 
 - imdb_to_movie: exact match for IMDb exports (links.csv carries imdbId)
@@ -17,6 +17,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+from .imdb_data import load_imdb_ratings
 
 YEAR_RE = re.compile(r"\((\d{4})\)\s*$")
 ARTICLE_RE = re.compile(r"^(.*), (The|A|An|La|Le|Les|L'|Der|Die|Das|Il|El|Los|Las|Un|Une|Een|De|Het|O|Os|As|Um|Uma)$", re.IGNORECASE)
@@ -83,8 +85,8 @@ class Movie:
     genres: list[str]
     imdb_id: int | None
     tmdb_id: int | None
-    n_ratings: int = 0
-    mean_rating: float | None = None
+    imdb_rating: float | None = None
+    imdb_votes: int = 0
 
     @property
     def imdb_url(self) -> str | None:
@@ -127,23 +129,20 @@ class Catalog:
         return None
 
 
-def load_catalog(data_root: Path, stats_path: Path | None = None) -> Catalog:
+def load_catalog(data_root: Path, imdb_ratings_path: Path | None = None) -> Catalog:
     movies_df = pd.read_csv(data_root / "movies.csv")
     links_df = pd.read_csv(data_root / "links.csv", dtype={"movieId": "int64"})
-
-    stats: dict[int, tuple[int, float]] = {}
-    if stats_path is not None and stats_path.exists():
-        stats_df = pd.read_csv(stats_path)
-        stats = {
-            int(row.movieId): (int(row.n_ratings), float(row.mean_rating))
-            for row in stats_df.itertuples()
-        }
 
     links = {}
     for row in links_df.itertuples():
         imdb = int(row.imdbId) if pd.notna(row.imdbId) else None
         tmdb = int(row.tmdbId) if pd.notna(row.tmdbId) else None
         links[int(row.movieId)] = (imdb, tmdb)
+
+    imdb_ratings: dict[int, tuple[float, int]] = {}
+    if imdb_ratings_path is not None and imdb_ratings_path.exists():
+        needed_ids = {imdb for imdb, _ in links.values() if imdb is not None}
+        imdb_ratings = load_imdb_ratings(imdb_ratings_path, needed_ids)
 
     movies: dict[int, Movie] = {}
     imdb_to_movie: dict[int, int] = {}
@@ -154,9 +153,9 @@ def load_catalog(data_root: Path, stats_path: Path | None = None) -> Catalog:
         title, year, alts = split_movielens_title(str(row.title))
         genres = [] if row.genres == "(no genres listed)" else str(row.genres).split("|")
         imdb_id, tmdb_id = links.get(movie_id, (None, None))
-        n_ratings, mean_rating = stats.get(movie_id, (0, None))
+        imdb_rating, imdb_votes = imdb_ratings.get(imdb_id, (None, 0))
         movie = Movie(
-            movie_id, front_article(title), year, genres, imdb_id, tmdb_id, n_ratings, mean_rating
+            movie_id, front_article(title), year, genres, imdb_id, tmdb_id, imdb_rating, imdb_votes
         )
         movies[movie_id] = movie
         if imdb_id is not None:
@@ -167,7 +166,7 @@ def load_catalog(data_root: Path, stats_path: Path | None = None) -> Catalog:
 
     # Popular movie wins ambiguous same-key matches without a usable year.
     for candidates in title_index.values():
-        candidates.sort(key=lambda pair: -(movies[pair[1]].n_ratings))
+        candidates.sort(key=lambda pair: -(movies[pair[1]].imdb_votes))
 
     return Catalog(movies=movies, imdb_to_movie=imdb_to_movie, title_index=title_index)
 

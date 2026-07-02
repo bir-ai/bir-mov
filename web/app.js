@@ -121,6 +121,10 @@ function link(href, label) {
   return a;
 }
 
+function formatVotes(votes) {
+  return votes == null ? "" : `${votes.toLocaleString()} votes`;
+}
+
 function render(data) {
   const { profile, recommendations, source } = data;
 
@@ -214,12 +218,15 @@ function render(data) {
           `${rec.predicted_letterboxd5.toFixed(1)}/5 on Letterboxd`
       )
     );
-    const community = document.createElement("div");
-    community.className = "rec-community";
-    if (rec.community_avg5 != null) {
-      community.textContent = `community ${rec.community_avg5.toFixed(2)} ★ · ${rec.community_votes.toLocaleString()} ratings`;
+    if (rec.imdb_rating != null) {
+      scores.append(
+        pill(
+          "actual-imdb",
+          `IMDb ${rec.imdb_rating.toFixed(1)} / 10 · ${formatVotes(rec.imdb_votes)}`,
+          "Official IMDb average rating and vote count"
+        )
+      );
     }
-    scores.append(community);
 
     row.append(rank, main, scores);
     items.append(row);
@@ -254,13 +261,13 @@ el("export-csv").addEventListener("click", () => {
   const rows = [
     [
       "rank", "title", "year", "genres", "predicted_imdb_10", "predicted_letterboxd_5",
-      "match_pct", "confidence", "because_you_liked", "community_avg_5", "community_votes",
+      "match_pct", "confidence", "because_you_liked", "imdb_rating", "imdb_votes",
       "imdb_url", "letterboxd_url",
     ],
     ...lastResult.recommendations.map((rec) => [
       rec.rank, rec.title, rec.year, rec.genres.join("|"), rec.predicted_imdb10,
       rec.predicted_letterboxd5, rec.match_pct, rec.confidence, rec.because_of.join("; "),
-      rec.community_avg5, rec.community_votes, rec.imdb_url, rec.letterboxd_url,
+      rec.imdb_rating, rec.imdb_votes, rec.imdb_url, rec.letterboxd_url,
     ]),
   ];
   download("bir-mov-recommendations.csv", "text/csv;charset=utf-8", toCsv(rows));

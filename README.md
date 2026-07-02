@@ -1,75 +1,154 @@
-# bir·mov
+# bir.mov
 
-Personal movie recommendations from your own IMDb or Letterboxd ratings, powered by
-two collaborative-filtering models trained on MovieLens ml-32m (see
-`ml-32m-train.ipynb`):
+Personal movie recommendations from your own IMDb or Letterboxd ratings.
 
-- [`mskayacioglu/ml32m-als128-v1`](https://huggingface.co/mskayacioglu/ml32m-als128-v1) —
-  implicit-feedback ALS, does the **ranking** (what to watch next)
-- [`mskayacioglu/ml32m-mf128-v1`](https://huggingface.co/mskayacioglu/ml32m-mf128-v1) —
-  explicit matrix factorization, does the **scoring** (the rating you'd likely give)
+`bir.mov` folds a new user's exported ratings into two MovieLens-trained
+collaborative-filtering models, then returns a watchlist with predicted personal
+scores, "because you liked..." explanations, and live IMDb rating context.
 
-Neither model has ever seen you, so your uploaded ratings are folded in at request
-time: ALS via `recalculate_user`, MF via a closed-form ridge solve against the
-frozen item factors.
+![bir.mov screenshot](docs/screenshot.png)
 
-![theme](web/bir_mark.png)
+## Features
 
-## What it does
+- Upload an IMDb ratings CSV, a Letterboxd `ratings.csv`, or a full Letterboxd
+  export `.zip`.
+- Match uploaded titles to the MovieLens ml-32m catalog by IMDb id or normalized
+  title + release year.
+- Rank recommendations with an implicit-feedback ALS model.
+- Predict the score you would likely give each film with an explicit matrix
+  factorization model.
+- Show the current IMDb average rating and vote count beside your predicted
+  score.
+- Filter recommendations by IMDb vote count to tune obscurity.
+- Export recommendations as CSV, JSON, or a Letterboxd import CSV.
 
-1. Upload an **IMDb ratings CSV**, a **Letterboxd `ratings.csv`**, or a full
-   **Letterboxd export `.zip`** (drag & drop).
-2. Titles are matched to the MovieLens catalog — IMDb exports by `tt` id via
-   `links.csv`, Letterboxd by normalized title + year (±1 tolerance).
-3. You get a ranked list with, per movie:
-   - predicted score on **IMDb's 10-point** and **Letterboxd's 5-star** scale
-   - match strength, confidence, and *"because you liked …"* explanations
-   - genre chips, community average + vote count
-   - direct **IMDb** and **Letterboxd** links
-4. Export the list as **CSV**, **JSON**, or a **Letterboxd-import CSV**.
+## How It Works
 
-The UI reuses the [bir](../bir) dashboard theme.
+The app uses two model artifacts trained on MovieLens ml-32m:
 
-## Setup
+- [`mskayacioglu/ml32m-als128-v1`](https://huggingface.co/mskayacioglu/ml32m-als128-v1)
+  ranks candidate films.
+- [`mskayacioglu/ml32m-mf128-v1`](https://huggingface.co/mskayacioglu/ml32m-mf128-v1)
+  predicts the user's likely rating.
 
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+The models do not store a factor vector for a brand-new user. At request time,
+the uploaded ratings are folded in:
 
-# MovieLens data (movies.csv/links.csv are required at runtime, ratings.csv
-# only for the one-time stats build): https://grouplens.org/datasets/movielens/32m/
-# unzip into ./ml-32m
+- ALS uses `recalculate_user` over the user's liked movies.
+- MF solves a small ridge-regression problem against frozen item factors.
 
-# one-time: aggregate ratings.csv into data/movie_stats.csv
-.venv/bin/python scripts/build_movie_stats.py
-```
+IMDb public ratings are read from IMDb's official Non-Commercial Datasets. On
+each server start, `title.ratings.tsv.gz` is refreshed from
+`https://datasets.imdbws.com/` into `data/`. The file is gitignored and is not
+redistributed. If IMDb cannot be reached, the app falls back to the last local
+copy when one exists.
 
-Model artifacts are picked up from `model/` when present, otherwise downloaded
-from Hugging Face into `.hf-cache/` on first start.
+## Quick Start
 
-## Run
+Clone the repo:
 
 ```bash
-.venv/bin/uvicorn app.main:app --port 8360
+git clone https://github.com/bir-ai/bir-mov.git
+cd bir-mov
 ```
 
-Open <http://127.0.0.1:8360>.
+Download MovieLens ml-32m from
+[GroupLens](https://grouplens.org/datasets/movielens/32m/) and unzip it into
+`./ml-32m`. At runtime, the app needs:
 
-## Tests
+```text
+ml-32m/movies.csv
+ml-32m/links.csv
+```
+
+Start the app:
 
 ```bash
-.venv/bin/python -m pytest tests/ -q
+scripts/run_server.sh
 ```
 
-## Layout
+Open [http://127.0.0.1:8360](http://127.0.0.1:8360).
 
+The run script creates `.venv-server`, installs Python dependencies when
+needed, refreshes the IMDb ratings cache on startup, and launches Uvicorn.
+
+Model artifacts are downloaded automatically into `.hf-cache/` when the server
+starts and no local model copy exists. To place a local copy under `./model/`
+instead, run:
+
+```bash
+scripts/download_models.sh
 ```
-app/            FastAPI backend
-  catalog.py    movies/links/stats + title-year matching
-  parsers.py    IMDb / Letterboxd export parsing
-  recommender.py  model loading + fold-in ranking & scoring
-  main.py       API + static hosting
-web/            static frontend (bir theme)
-scripts/        one-time data preparation
-tests/          parser + catalog tests
+
+## Export Your Ratings
+
+bir.mov works with your own rating export from IMDb or Letterboxd.
+
+### IMDb
+
+1. Go to [IMDb Exports](https://www.imdb.com/exports/).
+2. Sign in with the IMDb account that contains your ratings.
+3. Request or download your ratings export.
+4. Upload the resulting ratings CSV in bir.mov.
+
+The app reads IMDb exports by `tt` id, so IMDb uploads are matched directly
+against MovieLens `links.csv`.
+
+### Letterboxd
+
+1. Go to [Letterboxd data settings](https://letterboxd.com/settings/data/).
+2. Sign in with the Letterboxd account that contains your diary/ratings.
+3. Export your account data.
+4. Upload either the full Letterboxd `.zip` export or the included
+   `ratings.csv` file in bir.mov.
+
+Letterboxd uploads are matched by normalized title and release year, with a
+small year tolerance for catalog differences.
+
+## Data And Artifacts
+
+This repository intentionally does not ship large or redistributable data:
+
+- `ml-32m/` is ignored; download MovieLens separately.
+- `data/title.ratings.tsv.gz` is ignored; it is fetched from IMDb on startup.
+- `model/` is ignored; use `scripts/download_models.sh` to populate it from
+  Hugging Face when you want a local copy.
+- `.hf-cache/` is ignored; it is used by `huggingface_hub` as the automatic
+  model download cache.
+
+### Model Artifacts
+
+The model cards and binary artifacts live on Hugging Face:
+
+- ALS ranking model:
+  [`mskayacioglu/ml32m-als128-v1`](https://huggingface.co/mskayacioglu/ml32m-als128-v1)
+- MF scoring model:
+  [`mskayacioglu/ml32m-mf128-v1`](https://huggingface.co/mskayacioglu/ml32m-mf128-v1)
+
+These artifacts are derived from MovieLens ml-32m and are distributed under the
+MovieLens dataset terms. Commercial or revenue-bearing use requires permission
+from GroupLens.
+
+IMDb data is used under IMDb's Non-Commercial Datasets terms. MovieLens data is
+provided by GroupLens. This project is not affiliated with IMDb, Letterboxd, or
+GroupLens.
+
+## Project Structure
+
+```text
+app/              FastAPI backend
+  catalog.py      MovieLens catalog, IMDb ratings, title/year matching
+  imdb_data.py    IMDb dataset refresh and parsing
+  main.py         API and static hosting
+  parsers.py      IMDb and Letterboxd export parsing
+  recommender.py  model loading, user fold-in, ranking, scoring
+web/              static frontend
+scripts/          local run helpers
+docs/             README assets
+model/            ignored local model artifacts downloaded from Hugging Face
 ```
+
+## Links
+
+- Repository: [github.com/bir-ai/bir-mov](https://github.com/bir-ai/bir-mov)
+- Organization: [github.com/bir-ai](https://github.com/bir-ai)
