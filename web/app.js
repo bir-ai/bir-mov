@@ -203,9 +203,16 @@ function render(data) {
 
     const scores = document.createElement("div");
     scores.className = "rec-scores";
+    const isImdb = source === "imdb";
     scores.append(
-      pill("imdb", `IMDb ${rec.predicted_imdb10.toFixed(1)} / 10`, "Predicted rating on IMDb's 10-point scale"),
-      pill("letterboxd", `LB ${rec.predicted_letterboxd5.toFixed(1)} / 5`, "Predicted rating on Letterboxd's 5-star scale")
+      pill(
+        isImdb ? "imdb" : "letterboxd",
+        isImdb
+          ? `you'd rate ${rec.predicted_imdb10.toFixed(1)} / 10`
+          : `you'd rate ${rec.predicted_letterboxd5.toFixed(1)} ★`,
+        `Predicted from your own ratings — ${rec.predicted_imdb10.toFixed(1)}/10 on IMDb, ` +
+          `${rec.predicted_letterboxd5.toFixed(1)}/5 on Letterboxd`
+      )
     );
     const community = document.createElement("div");
     community.className = "rec-community";
