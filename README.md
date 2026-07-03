@@ -152,3 +152,11 @@ model/            ignored local model artifacts downloaded from Hugging Face
 
 - Repository: [github.com/bir-ai/bir-mov](https://github.com/bir-ai/bir-mov)
 - Organization: [github.com/bir-ai](https://github.com/bir-ai)
+
+## License
+
+The source code in this repository is licensed under the Apache License,
+Version 2.0. See [LICENSE](LICENSE).
+
+MovieLens, IMDb, and model artifacts remain governed by their respective
+upstream terms, as described in [Data And Artifacts](#data-and-artifacts).
