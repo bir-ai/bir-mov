@@ -21,14 +21,14 @@
             <div>
               <p class="eyebrow">Your Ratings</p>
               <h2>Upload an export</h2>
-              <p class="subtle">IMDb ratings CSV, Letterboxd ratings.csv, or a full Letterboxd export .zip</p>
+              <p class="subtle">One or more IMDb ratings CSV, Letterboxd ratings.csv, or full Letterboxd export .zip files</p>
             </div>
           </div>
 
           <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Upload ratings file">
-            <input type="file" id="file-input" accept=".csv,.zip" hidden />
+            <input type="file" id="file-input" accept=".csv,.zip" multiple hidden />
             <strong id="dropzone-title">Drop your file here</strong>
-            <span id="dropzone-hint">or click to browse</span>
+            <span id="dropzone-hint">or click to browse; select several files for group picks</span>
           </div>
 
           <div class="trace-filters">
@@ -70,7 +70,7 @@
               <p class="eyebrow">Recommendations</p>
               <h2 id="results-title">Personal picks</h2>
               <p class="subtle" id="results-subtitle">
-                Based on what you loved — each pick comes with the rating you'd likely give it.
+                Based on what you loved; add more files to balance picks across a group.
               </p>
             </div>
             <div class="export-actions" id="export-actions" hidden>

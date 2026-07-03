@@ -6,22 +6,33 @@ const dropzone = el("dropzone");
 const fileInput = el("file-input");
 const runButton = el("run-button");
 
-let selectedFile = null;
+let selectedFiles = [];
 let lastResult = null;
 
 // ---- file selection --------------------------------------------------------
 
-function setFile(file) {
-  if (!file) return;
-  const name = file.name.toLowerCase();
-  if (!name.endsWith(".csv") && !name.endsWith(".zip")) {
-    showError("Please choose a .csv or .zip export file.");
+function setFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (files.length === 0) return;
+  const invalid = files.find((file) => {
+    const name = file.name.toLowerCase();
+    return !name.endsWith(".csv") && !name.endsWith(".zip");
+  });
+  if (invalid) {
+    showError("Please choose only .csv or .zip export files.");
     return;
   }
-  selectedFile = file;
+  selectedFiles = files;
   dropzone.classList.add("has-file");
-  el("dropzone-title").textContent = file.name;
-  el("dropzone-hint").textContent = `${(file.size / 1024).toFixed(0)} KB — click to change`;
+  if (files.length === 1) {
+    el("dropzone-title").textContent = files[0].name;
+    el("dropzone-hint").textContent = `${(files[0].size / 1024).toFixed(0)} KB — click to change`;
+  } else {
+    const totalKb = files.reduce((sum, file) => sum + file.size, 0) / 1024;
+    const names = files.map((file) => file.name).join(", ");
+    el("dropzone-title").textContent = `${files.length} rating files selected`;
+    el("dropzone-hint").textContent = `${totalKb.toFixed(0)} KB total — ${names}`;
+  }
   runButton.disabled = false;
   hideError();
 }
@@ -33,7 +44,7 @@ dropzone.addEventListener("keydown", (event) => {
     fileInput.click();
   }
 });
-fileInput.addEventListener("change", () => setFile(fileInput.files[0]));
+fileInput.addEventListener("change", () => setFiles(fileInput.files));
 
 ["dragenter", "dragover"].forEach((type) =>
   dropzone.addEventListener(type, (event) => {
@@ -47,7 +58,7 @@ fileInput.addEventListener("change", () => setFile(fileInput.files[0]));
     dropzone.classList.remove("dragover");
   })
 );
-dropzone.addEventListener("drop", (event) => setFile(event.dataTransfer.files[0]));
+dropzone.addEventListener("drop", (event) => setFiles(event.dataTransfer.files));
 
 // ---- request ---------------------------------------------------------------
 
@@ -62,21 +73,26 @@ function hideError() {
 }
 
 async function run() {
-  if (!selectedFile) return;
+  if (selectedFiles.length === 0) return;
   runButton.disabled = true;
-  runButton.textContent = "Thinking…";
+  runButton.textContent = selectedFiles.length > 1 ? "Balancing group…" : "Thinking…";
   hideError();
   el("empty-state").hidden = true;
   el("rec-items").innerHTML = "";
   el("loading-state").hidden = false;
 
   const form = new FormData();
-  form.append("file", selectedFile);
+  if (selectedFiles.length === 1) {
+    form.append("file", selectedFiles[0]);
+  } else {
+    selectedFiles.forEach((file) => form.append("files", file));
+  }
   form.append("count", el("opt-count").value);
   form.append("min_votes", el("opt-votes").value);
 
   try {
-    const res = await fetch("/api/recommend", { method: "POST", body: form });
+    const endpoint = selectedFiles.length === 1 ? "/api/recommend" : "/api/group-recommend";
+    const res = await fetch(endpoint, { method: "POST", body: form });
     const data = await res.json();
     if (!res.ok) {
       throw new Error(data.detail || `Request failed (${res.status})`);
@@ -127,14 +143,28 @@ function formatVotes(votes) {
 
 function render(data) {
   const { profile, recommendations, source } = data;
+  const isGroup = source === "group";
 
-  el("results-title").textContent =
-    source === "imdb" ? "Picks from your IMDb ratings" : "Picks from your Letterboxd diary";
+  el("results-title").textContent = isGroup
+    ? `Picks for ${profile.user_count} people`
+    : source === "imdb"
+      ? "Picks from your IMDb ratings"
+      : "Picks from your Letterboxd diary";
+  el("results-subtitle").textContent = isGroup
+    ? "Balanced for shared taste, with per-person predicted ratings on each pick."
+    : "Based on what you loved; add more files to balance picks across a group.";
 
-  const mean =
-    source === "imdb" ? `${profile.mean_rating10} / 10` : `${profile.mean_rating5} / 5`;
-  el("profile-summary").textContent =
-    `${profile.matched} of ${profile.parsed} titles matched · you rate ${mean} on average`;
+  if (isGroup) {
+    const names = (profile.users || []).map((user) => user.name).join(", ");
+    el("profile-summary").textContent =
+      `${profile.user_count} profiles (${names}) · ${profile.matched} of ` +
+      `${profile.parsed} titles matched · group average ${profile.mean_rating5} / 5`;
+  } else {
+    const mean =
+      source === "imdb" ? `${profile.mean_rating10} / 10` : `${profile.mean_rating5} / 5`;
+    el("profile-summary").textContent =
+      `${profile.matched} of ${profile.parsed} titles matched · you rate ${mean} on average`;
+  }
 
   const chips = el("genre-chips");
   chips.innerHTML = "";
@@ -189,7 +219,7 @@ function render(data) {
     if (rec.because_of.length > 0) {
       const because = document.createElement("div");
       because.className = "rec-because";
-      because.append("Because you liked ");
+      because.append(isGroup ? "Closest to " : "Because you liked ");
       rec.because_of.forEach((liked, i) => {
         if (i > 0) because.append(" and ");
         const strong = document.createElement("strong");
@@ -197,6 +227,18 @@ function render(data) {
         because.append(strong);
       });
       main.append(because);
+    }
+
+    if (isGroup && rec.member_scores && rec.member_scores.length > 0) {
+      const members = document.createElement("div");
+      members.className = "member-scores";
+      rec.member_scores.forEach((member) => {
+        const span = document.createElement("span");
+        span.className = "member-score";
+        span.textContent = `${member.name}: ${member.predicted_letterboxd5.toFixed(1)} ★`;
+        members.append(span);
+      });
+      main.append(members);
     }
 
     const links = document.createElement("div");
@@ -208,16 +250,31 @@ function render(data) {
     const scores = document.createElement("div");
     scores.className = "rec-scores";
     const isImdb = source === "imdb";
-    scores.append(
-      pill(
-        isImdb ? "imdb" : "letterboxd",
-        isImdb
-          ? `you'd rate ${rec.predicted_imdb10.toFixed(1)} / 10`
-          : `you'd rate ${rec.predicted_letterboxd5.toFixed(1)} ★`,
-        `Predicted from your own ratings — ${rec.predicted_imdb10.toFixed(1)}/10 on IMDb, ` +
-          `${rec.predicted_letterboxd5.toFixed(1)}/5 on Letterboxd`
-      )
-    );
+    if (isGroup) {
+      scores.append(
+        pill(
+          "group",
+          `group match ${rec.match_pct}%`,
+          `Balanced group score; agreement ${rec.agreement_pct}%`
+        ),
+        pill(
+          "letterboxd",
+          `group ${rec.predicted_letterboxd5.toFixed(1)} ★`,
+          `Average predicted group rating; weakest member ${rec.weakest_predicted_letterboxd5.toFixed(1)}/5`
+        )
+      );
+    } else {
+      scores.append(
+        pill(
+          isImdb ? "imdb" : "letterboxd",
+          isImdb
+            ? `you'd rate ${rec.predicted_imdb10.toFixed(1)} / 10`
+            : `you'd rate ${rec.predicted_letterboxd5.toFixed(1)} ★`,
+          `Predicted from your own ratings — ${rec.predicted_imdb10.toFixed(1)}/10 on IMDb, ` +
+            `${rec.predicted_letterboxd5.toFixed(1)}/5 on Letterboxd`
+        )
+      );
+    }
     if (rec.imdb_rating != null) {
       scores.append(
         pill(
@@ -258,17 +315,38 @@ function toCsv(rows) {
 
 el("export-csv").addEventListener("click", () => {
   if (!lastResult) return;
+  const isGroup = lastResult.source === "group";
+  const baseHeader = [
+    "rank", "title", "year", "genres", "predicted_imdb_10", "predicted_letterboxd_5",
+    "match_pct", "confidence", "because_you_liked", "imdb_rating", "imdb_votes",
+    "imdb_url", "letterboxd_url",
+  ];
   const rows = [
-    [
-      "rank", "title", "year", "genres", "predicted_imdb_10", "predicted_letterboxd_5",
-      "match_pct", "confidence", "because_you_liked", "imdb_rating", "imdb_votes",
-      "imdb_url", "letterboxd_url",
-    ],
-    ...lastResult.recommendations.map((rec) => [
-      rec.rank, rec.title, rec.year, rec.genres.join("|"), rec.predicted_imdb10,
-      rec.predicted_letterboxd5, rec.match_pct, rec.confidence, rec.because_of.join("; "),
-      rec.imdb_rating, rec.imdb_votes, rec.imdb_url, rec.letterboxd_url,
-    ]),
+    isGroup
+      ? [
+          ...baseHeader,
+          "weakest_predicted_letterboxd_5",
+          "agreement_pct",
+          "member_predictions",
+        ]
+      : baseHeader,
+    ...lastResult.recommendations.map((rec) => {
+      const base = [
+        rec.rank, rec.title, rec.year, rec.genres.join("|"), rec.predicted_imdb10,
+        rec.predicted_letterboxd5, rec.match_pct, rec.confidence, rec.because_of.join("; "),
+        rec.imdb_rating, rec.imdb_votes, rec.imdb_url, rec.letterboxd_url,
+      ];
+      if (!isGroup) return base;
+      const members = (rec.member_scores || [])
+        .map((member) => `${member.name}: ${member.predicted_letterboxd5}`)
+        .join("; ");
+      return [
+        ...base,
+        rec.weakest_predicted_letterboxd5,
+        rec.agreement_pct,
+        members,
+      ];
+    }),
   ];
   download("bir-mov-recommendations.csv", "text/csv;charset=utf-8", toCsv(rows));
 });

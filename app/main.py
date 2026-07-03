@@ -22,6 +22,8 @@ IMDB_RATINGS_PATH = PROJECT_ROOT / "data" / IMDB_RATINGS_FILENAME
 WEB_ROOT = PROJECT_ROOT / "web"
 
 MAX_UPLOAD_BYTES = 30 * 1024 * 1024
+MAX_GROUP_UPLOAD_BYTES = 100 * 1024 * 1024
+MAX_GROUP_FILES = 8
 
 app = FastAPI(title="bir·mov", version="0.1.0")
 
@@ -68,6 +70,62 @@ def _movie_payload(rec) -> dict:
     }
 
 
+def _group_movie_payload(rec) -> dict:
+    payload = _movie_payload(rec)
+    payload.update(
+        {
+            "group_score": rec.group_score,
+            "weakest_predicted_letterboxd5": rec.weakest_predicted5,
+            "weakest_predicted_imdb10": round(rec.weakest_predicted5 * 2, 1),
+            "agreement_pct": rec.agreement_pct,
+            "member_scores": [
+                {
+                    "name": member.name,
+                    "predicted_letterboxd5": member.predicted5,
+                    "predicted_imdb10": member.predicted10,
+                }
+                for member in rec.member_scores
+            ],
+        }
+    )
+    return payload
+
+
+def _match_entries(parsed, catalog: Catalog) -> tuple[list[tuple], list[str]]:
+    matched, unmatched = [], []
+    for entry in parsed.entries:
+        movie = None
+        if entry.imdb_id is not None:
+            movie = catalog.by_imdb(entry.imdb_id)
+        if movie is None:
+            movie = catalog.by_title_year(entry.title, entry.year)
+        if movie is None:
+            unmatched.append(f"{entry.title} ({entry.year})" if entry.year else entry.title)
+        else:
+            matched.append((movie, entry.rating5))
+    return matched, unmatched
+
+
+def _profile_payload(profile, parsed_count: int, unmatched_count: int, skipped_rows: int) -> dict:
+    return {
+        "parsed": parsed_count,
+        "matched": profile.n_matched,
+        "unmatched": unmatched_count,
+        "skipped_rows": skipped_rows,
+        "mean_rating5": profile.mean_rating5,
+        "mean_rating10": round(profile.mean_rating5 * 2, 1),
+        "liked_titles": profile.n_liked,
+        "like_threshold5": profile.like_threshold5,
+        "top_genres": profile.top_genres,
+    }
+
+
+def _upload_display_name(filename: str | None, counts: dict[str, int]) -> str:
+    stem = Path(filename or "ratings").stem.strip() or "ratings"
+    counts[stem] = counts.get(stem, 0) + 1
+    return stem if counts[stem] == 1 else f"{stem} {counts[stem]}"
+
+
 @app.post("/api/recommend")
 async def recommend(
     file: UploadFile = File(...),
@@ -87,17 +145,7 @@ async def recommend(
     except ParseError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    matched, unmatched = [], []
-    for entry in parsed.entries:
-        movie = None
-        if entry.imdb_id is not None:
-            movie = _catalog.by_imdb(entry.imdb_id)
-        if movie is None:
-            movie = _catalog.by_title_year(entry.title, entry.year)
-        if movie is None:
-            unmatched.append(f"{entry.title} ({entry.year})" if entry.year else entry.title)
-        else:
-            matched.append((movie, entry.rating5))
+    matched, unmatched = _match_entries(parsed, _catalog)
 
     if not matched:
         raise HTTPException(
@@ -114,21 +162,124 @@ async def recommend(
 
     return {
         "source": parsed.source,
-        "profile": {
-            "parsed": len(parsed.entries),
-            "matched": profile.n_matched,
-            "unmatched": len(unmatched),
-            "skipped_rows": len(parsed.skipped),
-            "mean_rating5": profile.mean_rating5,
-            "mean_rating10": round(profile.mean_rating5 * 2, 1),
-            "liked_titles": profile.n_liked,
-            "like_threshold5": profile.like_threshold5,
-            "top_genres": profile.top_genres,
-        },
+        "profile": _profile_payload(
+            profile,
+            parsed_count=len(parsed.entries),
+            unmatched_count=len(unmatched),
+            skipped_rows=len(parsed.skipped),
+        ),
         "recommendations": [
             {"rank": i + 1, **_movie_payload(rec)} for i, rec in enumerate(recs)
         ],
         "unmatched_sample": unmatched[:25],
+        "models": _recommender.meta,
+    }
+
+
+@app.post("/api/group-recommend")
+async def group_recommend(
+    files: list[UploadFile] = File(...),
+    count: int = Form(25),
+    min_votes: int = Form(50),
+) -> dict:
+    if _catalog is None or _recommender is None:
+        raise HTTPException(status_code=503, detail="Models are still loading, retry shortly.")
+    if len(files) < 2:
+        raise HTTPException(status_code=422, detail="Upload at least two rating files.")
+    if len(files) > MAX_GROUP_FILES:
+        raise HTTPException(status_code=422, detail=f"Upload at most {MAX_GROUP_FILES} files.")
+
+    count = max(1, min(100, count))
+    min_votes = max(0, min(10_000_000, min_votes))
+
+    total_bytes = 0
+    name_counts: dict[str, int] = {}
+    grouped_matched: list[tuple[str, list[tuple]]] = []
+    user_inputs: list[dict] = []
+    exclude_movie_ids: set[int] = set()
+
+    for file in files:
+        content = await file.read()
+        total_bytes += len(content)
+        if len(content) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"{file.filename or 'A file'} is too large (30 MB limit).",
+            )
+        if total_bytes > MAX_GROUP_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="Uploaded files exceed the 100 MB limit.")
+
+        name = _upload_display_name(file.filename, name_counts)
+        try:
+            parsed = parse_upload(file.filename or "upload.csv", content)
+        except ParseError as exc:
+            raise HTTPException(status_code=422, detail=f"{name}: {exc}") from exc
+
+        matched, unmatched = _match_entries(parsed, _catalog)
+        if not matched:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{name}: no uploaded titles could be matched to the MovieLens catalog.",
+            )
+        exclude_movie_ids.update(movie.movie_id for movie, _ in matched)
+        grouped_matched.append((name, matched))
+        user_inputs.append(
+            {
+                "name": name,
+                "source": parsed.source,
+                "parsed": len(parsed.entries),
+                "skipped": len(parsed.skipped),
+                "unmatched": unmatched,
+            }
+        )
+
+    try:
+        group_profile, member_profiles, recs = _recommender.recommend_group(
+            grouped_matched,
+            _catalog,
+            count=count,
+            min_votes=min_votes,
+            exclude_movie_ids=exclude_movie_ids,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    users = []
+    unmatched_sample = []
+    for user_input, profile in zip(user_inputs, member_profiles):
+        users.append(
+            {
+                "name": user_input["name"],
+                "source": user_input["source"],
+                **_profile_payload(
+                    profile,
+                    parsed_count=user_input["parsed"],
+                    unmatched_count=len(user_input["unmatched"]),
+                    skipped_rows=user_input["skipped"],
+                ),
+            }
+        )
+        unmatched_sample.extend(
+            f"{user_input['name']}: {title}" for title in user_input["unmatched"][:10]
+        )
+
+    return {
+        "source": "group",
+        "profile": {
+            "user_count": group_profile.n_users,
+            "parsed": sum(user["parsed"] for user in users),
+            "matched": group_profile.n_matched,
+            "unmatched": sum(user["unmatched"] for user in users),
+            "skipped_rows": sum(user["skipped_rows"] for user in users),
+            "mean_rating5": group_profile.mean_rating5,
+            "mean_rating10": round(group_profile.mean_rating5 * 2, 1),
+            "top_genres": group_profile.top_genres,
+            "users": users,
+        },
+        "recommendations": [
+            {"rank": i + 1, **_group_movie_payload(rec)} for i, rec in enumerate(recs)
+        ],
+        "unmatched_sample": unmatched_sample[:25],
         "models": _recommender.meta,
     }
 

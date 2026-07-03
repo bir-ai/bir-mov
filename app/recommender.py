@@ -58,6 +58,14 @@ RERANK_WEIGHTS = {
     "disliked_similarity": 0.16,
 }
 
+GROUP_RERANK_WEIGHTS = {
+    "average": 0.50,
+    "minimum": 0.30,
+    "agreement": 0.15,
+    "quality": 0.05,
+}
+GROUP_AGREEMENT_SCALE = 1.5
+
 
 def resolve_model_dir(name: str, project_root: Path) -> Path:
     """Prefer the local artifact directory; fall back to the Hugging Face repo."""
@@ -86,6 +94,15 @@ class UserProfile:
 
 
 @dataclass
+class GroupProfile:
+    n_users: int
+    n_rated: int
+    n_matched: int
+    mean_rating5: float
+    top_genres: list[str]
+
+
+@dataclass
 class Recommendation:
     movie: Movie
     predicted5: float       # Letterboxd-style 0.5-5.0
@@ -98,11 +115,47 @@ class Recommendation:
 
 
 @dataclass
+class GroupMemberScore:
+    name: str
+    predicted5: float
+    predicted10: float
+
+
+@dataclass
+class GroupRecommendation:
+    movie: Movie
+    predicted5: float
+    predicted10: float
+    match_pct: int
+    group_score: float
+    weakest_predicted5: float
+    agreement_pct: int
+    member_scores: list[GroupMemberScore]
+    because_of: list[str]
+    confidence: str
+
+
+@dataclass
 class RerankedCandidate:
     idx: int
     movie: Movie
     als_score: float
     rerank_score: float
+
+
+@dataclass
+class FoldedUser:
+    name: str
+    profile: UserProfile
+    idx: np.ndarray
+    ratings5: np.ndarray
+    liked_idx: np.ndarray
+    mf_scores: np.ndarray
+    liked_for_similarity: np.ndarray
+    disliked_for_similarity: np.ndarray
+    genre_positive: dict[str, float]
+    genre_negative: dict[str, float]
+    titles_by_idx: dict[int, str]
 
 
 class Recommender:
@@ -398,15 +451,7 @@ class Recommender:
             for pos, score in zip(order, selected_scores)
         ]
 
-    # ---- public API ------------------------------------------------------
-
-    def recommend(
-        self,
-        matched: list[tuple[Movie, float]],
-        catalog: Catalog,
-        count: int = 25,
-        min_votes: int = 50,
-    ) -> tuple[UserProfile, list[Recommendation]]:
+    def _fold_user(self, name: str, matched: list[tuple[Movie, float]]) -> FoldedUser:
         known = [(m, r) for m, r in matched if m.movie_id in self.movie_id_to_idx]
         if not known:
             raise ValueError("None of the matched movies exist in the model vocabulary.")
@@ -424,8 +469,6 @@ class Recommender:
 
         liked_idx, like_threshold = self._liked_indices(idx, ratings5)
         mf_scores = self._mf_predict_all(idx, ratings5)
-        pool_size = self._candidate_pool_size(count, len(idx))
-        ids, als_scores = self._als_rank(liked_idx, idx, top_n=pool_size)
         dislike_cutoff = self._dislike_cutoff(like_threshold)
         liked_for_similarity = self._profile_sample(
             idx, ratings5, ratings5 >= like_threshold, high_first=True
@@ -434,18 +477,6 @@ class Recommender:
             idx, ratings5, ratings5 <= dislike_cutoff, high_first=False
         )
         genre_positive, genre_negative = self._genre_profiles(known_unique, like_threshold)
-        ranked = self._rerank_candidates(
-            ids=ids,
-            als_scores=als_scores,
-            mf_scores=mf_scores,
-            catalog=catalog,
-            min_votes=min_votes,
-            liked_for_similarity=liked_for_similarity,
-            disliked_for_similarity=disliked_for_similarity,
-            genre_positive=genre_positive,
-            genre_negative=genre_negative,
-            count=count,
-        )
 
         liked_set = set(liked_idx.tolist())
         titles_by_idx = {
@@ -453,6 +484,82 @@ class Recommender:
             for m, r in known
             if self.movie_id_to_idx[m.movie_id] in liked_set
         }
+        top_genres = [g for g, _ in sorted(genre_positive.items(), key=lambda kv: -kv[1])[:5]]
+        profile = UserProfile(
+            n_rated=len(matched),
+            n_matched=len(known),
+            mean_rating5=round(float(ratings5.mean()), 2),
+            n_liked=len(liked_idx),
+            like_threshold5=like_threshold,
+            top_genres=top_genres,
+        )
+
+        return FoldedUser(
+            name=name,
+            profile=profile,
+            idx=idx,
+            ratings5=ratings5,
+            liked_idx=liked_idx,
+            mf_scores=mf_scores,
+            liked_for_similarity=liked_for_similarity,
+            disliked_for_similarity=disliked_for_similarity,
+            genre_positive=genre_positive,
+            genre_negative=genre_negative,
+            titles_by_idx=titles_by_idx,
+        )
+
+    def _group_because_of(
+        self, rec_idx: int, users: list[FoldedUser], k: int = 3
+    ) -> list[str]:
+        reasons: list[tuple[float, str]] = []
+        for user in users:
+            if len(user.liked_idx) == 0:
+                continue
+            sims = self._als_items_unit[user.liked_idx] @ self._als_items_unit[rec_idx]
+            best_at = int(np.argmax(sims))
+            score = float(sims[best_at])
+            if score <= 0.1:
+                continue
+            liked_idx = int(user.liked_idx[best_at])
+            title = user.titles_by_idx.get(liked_idx)
+            if title:
+                reasons.append((score, f"{user.name}: {title}"))
+
+        seen: set[str] = set()
+        output: list[str] = []
+        for _, reason in sorted(reasons, key=lambda item: -item[0]):
+            if reason in seen:
+                continue
+            seen.add(reason)
+            output.append(reason)
+            if len(output) >= k:
+                break
+        return output
+
+    # ---- public API ------------------------------------------------------
+
+    def recommend(
+        self,
+        matched: list[tuple[Movie, float]],
+        catalog: Catalog,
+        count: int = 25,
+        min_votes: int = 50,
+    ) -> tuple[UserProfile, list[Recommendation]]:
+        user = self._fold_user("You", matched)
+        pool_size = self._candidate_pool_size(count, len(user.idx))
+        ids, als_scores = self._als_rank(user.liked_idx, user.idx, top_n=pool_size)
+        ranked = self._rerank_candidates(
+            ids=ids,
+            als_scores=als_scores,
+            mf_scores=user.mf_scores,
+            catalog=catalog,
+            min_votes=min_votes,
+            liked_for_similarity=user.liked_for_similarity,
+            disliked_for_similarity=user.disliked_for_similarity,
+            genre_positive=user.genre_positive,
+            genre_negative=user.genre_negative,
+            count=count,
+        )
 
         top_score = max((cand.rerank_score for cand in ranked), default=1.0)
         recs: list[Recommendation] = []
@@ -467,7 +574,7 @@ class Recommender:
                 else "medium" if match_pct >= 45
                 else "low"
             )
-            predicted5 = float(mf_scores[cand.idx])
+            predicted5 = float(user.mf_scores[cand.idx])
             recs.append(
                 Recommendation(
                     movie=cand.movie,
@@ -476,19 +583,131 @@ class Recommender:
                     match_pct=match_pct,
                     als_score=cand.als_score,
                     rerank_score=cand.rerank_score,
-                    because_of=self._because_of(cand.idx, liked_idx, titles_by_idx),
+                    because_of=self._because_of(cand.idx, user.liked_idx, user.titles_by_idx),
                     confidence=confidence,
                 )
             )
 
-        top_genres = [g for g, _ in sorted(genre_positive.items(), key=lambda kv: -kv[1])[:5]]
+        return user.profile, recs
 
-        profile = UserProfile(
-            n_rated=len(matched),
-            n_matched=len(known),
-            mean_rating5=round(float(ratings5.mean()), 2),
-            n_liked=len(liked_idx),
-            like_threshold5=like_threshold,
+    def recommend_group(
+        self,
+        grouped_matched: list[tuple[str, list[tuple[Movie, float]]]],
+        catalog: Catalog,
+        count: int = 25,
+        min_votes: int = 50,
+        exclude_movie_ids: set[int] | None = None,
+    ) -> tuple[GroupProfile, list[UserProfile], list[GroupRecommendation]]:
+        if len(grouped_matched) < 2:
+            raise ValueError("Upload at least two rating files for group recommendations.")
+
+        users = [self._fold_user(name, matched) for name, matched in grouped_matched]
+        exclude_movie_ids = exclude_movie_ids or set()
+        excluded_idx = np.array(
+            [
+                self.movie_id_to_idx[movie_id]
+                for movie_id in exclude_movie_ids
+                if movie_id in self.movie_id_to_idx
+            ],
+            dtype=np.int64,
+        )
+        rated_arrays = [user.idx for user in users]
+        if len(excluded_idx) > 0:
+            rated_arrays.append(excluded_idx)
+        group_rated_idx = np.unique(np.concatenate(rated_arrays))
+        group_rated_set = set(group_rated_idx.tolist())
+
+        candidate_ids: set[int] = set()
+        for user in users:
+            pool_size = self._candidate_pool_size(count, len(group_rated_idx))
+            ids, _ = self._als_rank(user.liked_idx, group_rated_idx, top_n=pool_size)
+            candidate_ids.update(int(idx) for idx in ids)
+
+        candidates: list[tuple[int, Movie]] = []
+        for idx in candidate_ids:
+            if idx in group_rated_set:
+                continue
+            movie = catalog.movies.get(int(self.movie_ids[idx]))
+            if movie is None or movie.imdb_votes < min_votes:
+                continue
+            if movie.movie_id in exclude_movie_ids:
+                continue
+            candidates.append((idx, movie))
+
+        if not candidates:
+            raise ValueError("No group recommendations could be generated with the current filters.")
+
+        candidate_idx = np.array([idx for idx, _ in candidates], dtype=np.int64)
+        member_predictions = np.vstack([user.mf_scores[candidate_idx] for user in users])
+        rating_components = np.clip((member_predictions - 2.5) / 2.5, 0.0, 1.0)
+        average_component = rating_components.mean(axis=0)
+        minimum_component = rating_components.min(axis=0)
+        agreement_component = 1.0 - np.clip(
+            member_predictions.std(axis=0) / GROUP_AGREEMENT_SCALE,
+            0.0,
+            1.0,
+        )
+        quality_component = np.array(
+            [self._imdb_quality(movie) for _, movie in candidates],
+            dtype=np.float64,
+        )
+        group_scores = (
+            GROUP_RERANK_WEIGHTS["average"] * average_component
+            + GROUP_RERANK_WEIGHTS["minimum"] * minimum_component
+            + GROUP_RERANK_WEIGHTS["agreement"] * agreement_component
+            + GROUP_RERANK_WEIGHTS["quality"] * quality_component
+        )
+
+        order, selected_scores = self._diverse_order(candidate_idx, group_scores, count)
+        top_score = float(np.max(selected_scores)) if len(selected_scores) else 1.0
+        recs: list[GroupRecommendation] = []
+        for pos, selected_score in zip(order, selected_scores):
+            preds = member_predictions[:, pos]
+            average_predicted5 = float(preds.mean())
+            weakest_predicted5 = float(preds.min())
+            match_pct = (
+                int(round(100 * max(float(selected_score), 0.0) / top_score))
+                if top_score > 0
+                else 0
+            )
+            confidence = (
+                "high" if match_pct >= 75 and weakest_predicted5 >= 3.5
+                else "medium" if match_pct >= 45 and weakest_predicted5 >= 3.0
+                else "low"
+            )
+            member_scores = [
+                GroupMemberScore(
+                    name=user.name,
+                    predicted5=round(float(pred) * 2) / 2,
+                    predicted10=round(float(pred) * 2, 1),
+                )
+                for user, pred in zip(users, preds)
+            ]
+            recs.append(
+                GroupRecommendation(
+                    movie=candidates[pos][1],
+                    predicted5=round(average_predicted5 * 2) / 2,
+                    predicted10=round(average_predicted5 * 2, 1),
+                    match_pct=match_pct,
+                    group_score=float(selected_score),
+                    weakest_predicted5=round(weakest_predicted5 * 2) / 2,
+                    agreement_pct=int(round(100 * float(agreement_component[pos]))),
+                    member_scores=member_scores,
+                    because_of=self._group_because_of(int(candidate_idx[pos]), users),
+                    confidence=confidence,
+                )
+            )
+
+        genre_totals: dict[str, float] = {}
+        for user in users:
+            for genre, weight in user.genre_positive.items():
+                genre_totals[genre] = genre_totals.get(genre, 0.0) + weight
+        top_genres = [g for g, _ in sorted(genre_totals.items(), key=lambda kv: -kv[1])[:5]]
+        profile = GroupProfile(
+            n_users=len(users),
+            n_rated=sum(user.profile.n_rated for user in users),
+            n_matched=sum(user.profile.n_matched for user in users),
+            mean_rating5=round(float(np.mean([user.profile.mean_rating5 for user in users])), 2),
             top_genres=top_genres,
         )
-        return profile, recs
+        return profile, [user.profile for user in users], recs

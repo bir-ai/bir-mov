@@ -425,6 +425,26 @@ h2 {
   color: var(--text);
 }
 
+.member-scores {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.member-score {
+  display: inline-flex;
+  min-height: 22px;
+  align-items: center;
+  padding: 0 7px;
+  border: 1px solid rgba(81, 189, 86, 0.28);
+  border-radius: 999px;
+  background: rgba(81, 189, 86, 0.08);
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 .rec-links {
   display: flex;
   flex-wrap: wrap;
@@ -482,6 +502,11 @@ h2 {
 .score-pill.letterboxd {
   border-color: rgba(81, 189, 86, 0.4);
   color: var(--green);
+}
+
+.score-pill.group {
+  border-color: rgba(48, 106, 248, 0.46);
+  color: rgb(155, 184, 255);
 }
 
 .score-pill.actual-imdb {
