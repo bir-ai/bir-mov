@@ -9,6 +9,62 @@ const runButton = el("run-button");
 let selectedFiles = [];
 let lastResult = null;
 
+// ---- genre filter chips ------------------------------------------------------
+
+const GENRES = [
+  "Action", "Adventure", "Animation", "Children", "Comedy", "Crime",
+  "Documentary", "Drama", "Fantasy", "Film-Noir", "Horror", "IMAX",
+  "Musical", "Mystery", "Romance", "Sci-Fi", "Thriller", "War", "Western",
+];
+
+const GENRE_STATES = ["off", "include", "exclude"];
+const GENRE_STATE_LABEL = { off: "not filtered", include: "included", exclude: "excluded" };
+
+let genreMode = "any";
+
+function setChipState(chip, state) {
+  chip.dataset.state = state;
+  chip.setAttribute("aria-label", `${chip.dataset.genre}: ${GENRE_STATE_LABEL[state]}`);
+}
+
+function buildGenreGrid() {
+  const grid = el("genre-grid");
+  GENRES.forEach((genre) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "genre-chip";
+    chip.dataset.genre = genre;
+    chip.textContent = genre;
+    setChipState(chip, "off");
+    chip.addEventListener("click", () => {
+      const next = GENRE_STATES[(GENRE_STATES.indexOf(chip.dataset.state) + 1) % GENRE_STATES.length];
+      setChipState(chip, next);
+      updateFilterControls();
+    });
+    grid.append(chip);
+  });
+}
+
+function genresInState(state) {
+  return Array.from(el("genre-grid").children)
+    .filter((chip) => chip.dataset.state === state)
+    .map((chip) => chip.dataset.genre);
+}
+
+function setGenreMode(mode) {
+  genreMode = mode;
+  Array.from(el("genre-mode").children).forEach((button) =>
+    button.setAttribute("aria-pressed", String(button.dataset.value === mode))
+  );
+}
+
+el("genre-mode").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-value]");
+  if (!button) return;
+  setGenreMode(button.dataset.value);
+  updateFilterControls();
+});
+
 // ---- file selection --------------------------------------------------------
 
 function setFiles(fileList) {
@@ -33,8 +89,8 @@ function setFiles(fileList) {
     el("dropzone-title").textContent = `${files.length} rating files selected`;
     el("dropzone-hint").textContent = `${totalKb.toFixed(0)} KB total — ${names}`;
   }
-  runButton.disabled = false;
   hideError();
+  updateFilterControls();
 }
 
 dropzone.addEventListener("click", () => fileInput.click());
@@ -72,8 +128,96 @@ function hideError() {
   el("error-state").hidden = true;
 }
 
+function appendOptional(form, name, value) {
+  const text = String(value ?? "").trim();
+  if (text) form.append(name, text);
+}
+
+function validateFilters() {
+  const minVotes = Number(el("opt-votes").value || 0);
+  const maxVotes = Number(el("opt-max-votes").value || 0);
+  if (maxVotes > 0 && maxVotes < minVotes) {
+    return {
+      message: "Maximum IMDb votes cannot be lower than minimum IMDb votes.",
+      fields: ["opt-votes", "opt-max-votes"],
+    };
+  }
+
+  const minYear = Number(el("opt-year-min").value || 0);
+  const maxYear = Number(el("opt-year-max").value || 0);
+  if (minYear > 0 && maxYear > 0 && minYear > maxYear) {
+    return {
+      message: "From year cannot be later than to year.",
+      fields: ["opt-year-min", "opt-year-max"],
+    };
+  }
+
+  return null;
+}
+
+const FILTER_FIELD_IDS = ["opt-votes", "opt-max-votes", "opt-rating", "opt-year-min", "opt-year-max"];
+
+function activeFilterCount() {
+  let count = 0;
+  if (el("opt-votes").value !== "1000") count += 1;
+  if (el("opt-max-votes").value !== "") count += 1;
+  if (el("opt-rating").value !== "0") count += 1;
+  if (el("opt-year-min").value || el("opt-year-max").value) count += 1;
+  const included = genresInState("include");
+  if (included.length > 0) count += 1;
+  if (genresInState("exclude").length > 0) count += 1;
+  if (included.length >= 2 && genreMode === "all") count += 1;
+  return count;
+}
+
+function updateFilterControls() {
+  el("genre-mode-group").hidden = genresInState("include").length < 2;
+
+  const error = validateFilters();
+  FILTER_FIELD_IDS.forEach((id) =>
+    el(id).classList.toggle("invalid", Boolean(error && error.fields.includes(id)))
+  );
+  const errorBox = el("filter-error");
+  errorBox.hidden = !error;
+  errorBox.textContent = error ? error.message : "";
+
+  const active = activeFilterCount();
+  const reset = el("reset-filters");
+  reset.hidden = active === 0;
+  reset.textContent = active === 1 ? "Reset 1 filter" : `Reset ${active} filters`;
+
+  runButton.disabled = selectedFiles.length === 0 || Boolean(error);
+}
+
+function appendRecommendationFilters(form) {
+  form.append("min_votes", el("opt-votes").value || "0");
+  appendOptional(form, "max_votes", el("opt-max-votes").value);
+  appendOptional(form, "min_year", el("opt-year-min").value);
+  appendOptional(form, "max_year", el("opt-year-max").value);
+  appendOptional(form, "min_imdb_rating", el("opt-rating").value);
+
+  const includeGenres = genresInState("include");
+  const excludeGenres = genresInState("exclude");
+  if (includeGenres.length > 0) form.append("include_genres", includeGenres.join(","));
+  if (excludeGenres.length > 0) form.append("exclude_genres", excludeGenres.join(","));
+  form.append("genre_match", includeGenres.length >= 2 ? genreMode : "any");
+}
+
+function resetFilters() {
+  el("opt-votes").value = "1000";
+  el("opt-max-votes").value = "";
+  el("opt-rating").value = "0";
+  el("opt-year-min").value = "";
+  el("opt-year-max").value = "";
+  setGenreMode("any");
+  Array.from(el("genre-grid").children).forEach((chip) => setChipState(chip, "off"));
+  hideError();
+  updateFilterControls();
+}
+
 async function run() {
-  if (selectedFiles.length === 0) return;
+  if (selectedFiles.length === 0 || validateFilters()) return;
+
   runButton.disabled = true;
   runButton.textContent = selectedFiles.length > 1 ? "Balancing group…" : "Thinking…";
   hideError();
@@ -88,7 +232,7 @@ async function run() {
     selectedFiles.forEach((file) => form.append("files", file));
   }
   form.append("count", el("opt-count").value);
-  form.append("min_votes", el("opt-votes").value);
+  appendRecommendationFilters(form);
 
   try {
     const endpoint = selectedFiles.length === 1 ? "/api/recommend" : "/api/group-recommend";
@@ -104,12 +248,17 @@ async function run() {
     el("empty-state").hidden = false;
   } finally {
     el("loading-state").hidden = true;
-    runButton.disabled = false;
     runButton.textContent = "Get recommendations";
+    updateFilterControls();
   }
 }
 
 runButton.addEventListener("click", run);
+el("reset-filters").addEventListener("click", resetFilters);
+FILTER_FIELD_IDS.forEach((id) => el(id).addEventListener("input", updateFilterControls));
+
+buildGenreGrid();
+updateFilterControls();
 
 // ---- rendering ---------------------------------------------------------------
 

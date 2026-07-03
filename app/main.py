@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from .catalog import Catalog, load_catalog
 from .imdb_data import IMDB_RATINGS_FILENAME, ensure_imdb_ratings
 from .parsers import ParseError, parse_upload
-from .recommender import Recommender
+from .recommender import DEFAULT_MIN_VOTES, RecommendationFilters, Recommender
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_ROOT = PROJECT_ROOT / "ml-32m"
@@ -24,6 +24,9 @@ WEB_ROOT = PROJECT_ROOT / "web"
 MAX_UPLOAD_BYTES = 30 * 1024 * 1024
 MAX_GROUP_UPLOAD_BYTES = 100 * 1024 * 1024
 MAX_GROUP_FILES = 8
+MAX_VOTE_FILTER = 10_000_000
+MIN_RELEASE_YEAR = 1874
+MAX_RELEASE_YEAR = 2100
 
 app = FastAPI(title="bir·mov", version="0.1.0")
 
@@ -126,16 +129,100 @@ def _upload_display_name(filename: str | None, counts: dict[str, int]) -> str:
     return stem if counts[stem] == 1 else f"{stem} {counts[stem]}"
 
 
+def _parse_genres(raw: str | None) -> frozenset[str]:
+    return frozenset(part.strip() for part in (raw or "").split(",") if part.strip())
+
+
+def _clamp_optional_int(value: int | None, low: int, high: int) -> int | None:
+    if value is None:
+        return None
+    return max(low, min(high, value))
+
+
+def _build_filters(
+    min_votes: int,
+    max_votes: int | None,
+    min_year: int | None,
+    max_year: int | None,
+    include_genres: str | None,
+    exclude_genres: str | None,
+    genre_match: str,
+    min_imdb_rating: float | None,
+) -> RecommendationFilters:
+    min_votes = max(0, min(MAX_VOTE_FILTER, min_votes))
+    max_votes = (
+        None
+        if max_votes is None or max_votes <= 0
+        else max(0, min(MAX_VOTE_FILTER, max_votes))
+    )
+    if max_votes is not None and max_votes < min_votes:
+        raise HTTPException(
+            status_code=422,
+            detail="Maximum IMDb votes cannot be lower than minimum IMDb votes.",
+        )
+
+    min_year = _clamp_optional_int(min_year, MIN_RELEASE_YEAR, MAX_RELEASE_YEAR)
+    max_year = _clamp_optional_int(max_year, MIN_RELEASE_YEAR, MAX_RELEASE_YEAR)
+    if min_year is not None and max_year is not None and min_year > max_year:
+        raise HTTPException(
+            status_code=422,
+            detail="Minimum year cannot be later than maximum year.",
+        )
+
+    include = _parse_genres(include_genres)
+    exclude = _parse_genres(exclude_genres)
+    overlap = {genre.casefold() for genre in include} & {genre.casefold() for genre in exclude}
+    if overlap:
+        raise HTTPException(
+            status_code=422,
+            detail="A genre cannot be both included and excluded.",
+        )
+
+    genre_match = "all" if genre_match == "all" else "any"
+    min_imdb_rating = (
+        None
+        if min_imdb_rating is None or min_imdb_rating <= 0
+        else max(0.0, min(10.0, min_imdb_rating))
+    )
+
+    return RecommendationFilters(
+        min_votes=min_votes,
+        max_votes=max_votes,
+        min_year=min_year,
+        max_year=max_year,
+        include_genres=include,
+        exclude_genres=exclude,
+        genre_match=genre_match,
+        min_imdb_rating=min_imdb_rating,
+    )
+
+
 @app.post("/api/recommend")
 async def recommend(
     file: UploadFile = File(...),
     count: int = Form(25),
-    min_votes: int = Form(50),
+    min_votes: int = Form(DEFAULT_MIN_VOTES),
+    max_votes: int | None = Form(None),
+    min_year: int | None = Form(None),
+    max_year: int | None = Form(None),
+    include_genres: str | None = Form(None),
+    exclude_genres: str | None = Form(None),
+    genre_match: str = Form("any"),
+    min_imdb_rating: float | None = Form(None),
 ) -> dict:
     if _catalog is None or _recommender is None:
         raise HTTPException(status_code=503, detail="Models are still loading, retry shortly.")
     count = max(1, min(100, count))
-    min_votes = max(0, min(10_000_000, min_votes))
+    filters = _build_filters(
+        min_votes=min_votes,
+        max_votes=max_votes,
+        min_year=min_year,
+        max_year=max_year,
+        include_genres=include_genres,
+        exclude_genres=exclude_genres,
+        genre_match=genre_match,
+        min_imdb_rating=min_imdb_rating,
+    )
 
     content = await file.read()
     if len(content) > MAX_UPLOAD_BYTES:
@@ -155,7 +242,7 @@ async def recommend(
 
     try:
         profile, recs = _recommender.recommend(
-            matched, _catalog, count=count, min_votes=min_votes
+            matched, _catalog, count=count, filters=filters
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -180,7 +267,14 @@ async def recommend(
 async def group_recommend(
     files: list[UploadFile] = File(...),
     count: int = Form(25),
-    min_votes: int = Form(50),
+    min_votes: int = Form(DEFAULT_MIN_VOTES),
+    max_votes: int | None = Form(None),
+    min_year: int | None = Form(None),
+    max_year: int | None = Form(None),
+    include_genres: str | None = Form(None),
+    exclude_genres: str | None = Form(None),
+    genre_match: str = Form("any"),
+    min_imdb_rating: float | None = Form(None),
 ) -> dict:
     if _catalog is None or _recommender is None:
         raise HTTPException(status_code=503, detail="Models are still loading, retry shortly.")
@@ -190,7 +284,16 @@ async def group_recommend(
         raise HTTPException(status_code=422, detail=f"Upload at most {MAX_GROUP_FILES} files.")
 
     count = max(1, min(100, count))
-    min_votes = max(0, min(10_000_000, min_votes))
+    filters = _build_filters(
+        min_votes=min_votes,
+        max_votes=max_votes,
+        min_year=min_year,
+        max_year=max_year,
+        include_genres=include_genres,
+        exclude_genres=exclude_genres,
+        genre_match=genre_match,
+        min_imdb_rating=min_imdb_rating,
+    )
 
     total_bytes = 0
     name_counts: dict[str, int] = {}
@@ -238,7 +341,7 @@ async def group_recommend(
             grouped_matched,
             _catalog,
             count=count,
-            min_votes=min_votes,
+            filters=filters,
             exclude_movie_ids=exclude_movie_ids,
         )
     except ValueError as exc:

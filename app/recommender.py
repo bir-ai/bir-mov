@@ -38,10 +38,14 @@ ALS_ALPHA = 40.0            # confidence weight used at training time
 MF_BIAS_DAMPING = 10.0      # shrinkage for the folded-in user bias
 MF_LAMBDA = 0.02            # per-sample L2 used at training time
 LIKE_THRESHOLDS = (4.0, 3.5, 3.0)
+DEFAULT_MIN_VOTES = 1_000
 
 RERANK_POOL_MIN = 500
 RERANK_POOL_MAX = 4_000
 RERANK_POOL_MULTIPLIER = 40
+RERANK_FILTERED_POOL_MIN = 2_000
+RERANK_FILTERED_POOL_MAX = 12_000
+RERANK_FILTERED_POOL_MULTIPLIER = 120
 SIMILARITY_PROFILE_LIMIT = 300
 MMR_POOL_MULTIPLIER = 10
 MMR_POOL_MIN = 200
@@ -141,6 +145,68 @@ class RerankedCandidate:
     movie: Movie
     als_score: float
     rerank_score: float
+
+
+@dataclass(frozen=True)
+class RecommendationFilters:
+    min_votes: int = DEFAULT_MIN_VOTES
+    max_votes: int | None = None
+    min_year: int | None = None
+    max_year: int | None = None
+    include_genres: frozenset[str] = frozenset()
+    exclude_genres: frozenset[str] = frozenset()
+    genre_match: str = "any"
+    min_imdb_rating: float | None = None
+
+    @property
+    def expands_pool(self) -> bool:
+        return (
+            self.max_votes is not None
+            or self.min_year is not None
+            or self.max_year is not None
+            or bool(self.include_genres)
+            or bool(self.exclude_genres)
+            or self.min_imdb_rating is not None
+            or self.min_votes >= 25_000
+        )
+
+    @staticmethod
+    def _genre_keys(genres) -> set[str]:
+        return {
+            key
+            for genre in genres
+            if (key := str(genre).strip().casefold())
+        }
+
+    def matches(self, movie: Movie) -> bool:
+        if movie.imdb_votes < self.min_votes:
+            return False
+        if self.max_votes is not None and movie.imdb_votes > self.max_votes:
+            return False
+        if self.min_year is not None and (movie.year is None or movie.year < self.min_year):
+            return False
+        if self.max_year is not None and (movie.year is None or movie.year > self.max_year):
+            return False
+        if (
+            self.min_imdb_rating is not None
+            and (movie.imdb_rating is None or movie.imdb_rating < self.min_imdb_rating)
+        ):
+            return False
+
+        movie_genres = self._genre_keys(movie.genres)
+        include_genres = self._genre_keys(self.include_genres)
+        exclude_genres = self._genre_keys(self.exclude_genres)
+
+        if include_genres:
+            if self.genre_match == "all":
+                if not include_genres.issubset(movie_genres):
+                    return False
+            elif movie_genres.isdisjoint(include_genres):
+                return False
+        if exclude_genres and not movie_genres.isdisjoint(exclude_genres):
+            return False
+
+        return True
 
 
 @dataclass
@@ -256,10 +322,16 @@ class Recommender:
 
     # ---- reranking helpers ------------------------------------------------
 
-    def _candidate_pool_size(self, count: int, rated_count: int) -> int:
+    def _candidate_pool_size(
+        self, count: int, rated_count: int, filters: RecommendationFilters | None = None
+    ) -> int:
         available = max(0, self.n_movies - rated_count)
         target = max(RERANK_POOL_MIN, count * RERANK_POOL_MULTIPLIER)
-        return min(available, RERANK_POOL_MAX, target)
+        pool_max = RERANK_POOL_MAX
+        if filters is not None and filters.expands_pool:
+            target = max(target, RERANK_FILTERED_POOL_MIN, count * RERANK_FILTERED_POOL_MULTIPLIER)
+            pool_max = RERANK_FILTERED_POOL_MAX
+        return min(available, pool_max, target)
 
     @staticmethod
     def _minmax(values: np.ndarray) -> np.ndarray:
@@ -388,7 +460,7 @@ class Recommender:
         als_scores: np.ndarray,
         mf_scores: np.ndarray,
         catalog: Catalog,
-        min_votes: int,
+        filters: RecommendationFilters,
         liked_for_similarity: np.ndarray,
         disliked_for_similarity: np.ndarray,
         genre_positive: dict[str, float],
@@ -398,7 +470,7 @@ class Recommender:
         candidates: list[tuple[int, Movie, float]] = []
         for rec_i, score in zip(ids, als_scores):
             movie = catalog.movies.get(int(self.movie_ids[rec_i]))
-            if movie is None or movie.imdb_votes < min_votes:
+            if movie is None or not filters.matches(movie):
                 continue
             candidates.append((int(rec_i), movie, float(score)))
 
@@ -543,23 +615,27 @@ class Recommender:
         matched: list[tuple[Movie, float]],
         catalog: Catalog,
         count: int = 25,
-        min_votes: int = 50,
+        min_votes: int = DEFAULT_MIN_VOTES,
+        filters: RecommendationFilters | None = None,
     ) -> tuple[UserProfile, list[Recommendation]]:
+        filters = filters or RecommendationFilters(min_votes=min_votes)
         user = self._fold_user("You", matched)
-        pool_size = self._candidate_pool_size(count, len(user.idx))
+        pool_size = self._candidate_pool_size(count, len(user.idx), filters)
         ids, als_scores = self._als_rank(user.liked_idx, user.idx, top_n=pool_size)
         ranked = self._rerank_candidates(
             ids=ids,
             als_scores=als_scores,
             mf_scores=user.mf_scores,
             catalog=catalog,
-            min_votes=min_votes,
+            filters=filters,
             liked_for_similarity=user.liked_for_similarity,
             disliked_for_similarity=user.disliked_for_similarity,
             genre_positive=user.genre_positive,
             genre_negative=user.genre_negative,
             count=count,
         )
+        if not ranked:
+            raise ValueError("No recommendations could be generated with the current filters.")
 
         top_score = max((cand.rerank_score for cand in ranked), default=1.0)
         recs: list[Recommendation] = []
@@ -595,12 +671,14 @@ class Recommender:
         grouped_matched: list[tuple[str, list[tuple[Movie, float]]]],
         catalog: Catalog,
         count: int = 25,
-        min_votes: int = 50,
+        min_votes: int = DEFAULT_MIN_VOTES,
+        filters: RecommendationFilters | None = None,
         exclude_movie_ids: set[int] | None = None,
     ) -> tuple[GroupProfile, list[UserProfile], list[GroupRecommendation]]:
         if len(grouped_matched) < 2:
             raise ValueError("Upload at least two rating files for group recommendations.")
 
+        filters = filters or RecommendationFilters(min_votes=min_votes)
         users = [self._fold_user(name, matched) for name, matched in grouped_matched]
         exclude_movie_ids = exclude_movie_ids or set()
         excluded_idx = np.array(
@@ -619,7 +697,7 @@ class Recommender:
 
         candidate_ids: set[int] = set()
         for user in users:
-            pool_size = self._candidate_pool_size(count, len(group_rated_idx))
+            pool_size = self._candidate_pool_size(count, len(group_rated_idx), filters)
             ids, _ = self._als_rank(user.liked_idx, group_rated_idx, top_n=pool_size)
             candidate_ids.update(int(idx) for idx in ids)
 
@@ -628,7 +706,7 @@ class Recommender:
             if idx in group_rated_set:
                 continue
             movie = catalog.movies.get(int(self.movie_ids[idx]))
-            if movie is None or movie.imdb_votes < min_votes:
+            if movie is None or not filters.matches(movie):
                 continue
             if movie.movie_id in exclude_movie_ids:
                 continue

@@ -19,7 +19,8 @@ scores, "because you liked..." explanations, and live IMDb rating context.
   factorization model.
 - Show the current IMDb average rating and vote count beside your predicted
   score.
-- Filter recommendations by IMDb vote count to tune obscurity.
+- Filter recommendations by IMDb vote count, year range, genre, and IMDb rating
+  to tune obscurity and scope.
 - Export recommendations as CSV, JSON, or a Letterboxd import CSV.
 
 ## How It Works
